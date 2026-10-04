@@ -22,8 +22,24 @@ const MAX_WIDTH := 160.0
 ## 挡板中心的合法 X 范围（由 Main 根据墙体位置写入）
 @export var left_bound := 20.0
 @export var right_bound := 460.0
-@export var color := Color("f9c74f")
+@export var color := Color("f9c74f"):
+	set(value):
+		color = value
+		if is_inside_tree():
+			queue_redraw()
+## 蓄力比例 0~1，由 Main 写入；0 时不画蓄力条
+var charge_ratio := 0.0
+## 蓄力条与蓄满时的高亮色，跟随当前关卡调色板
+@export var charge_color := Color("ffd166"):
+	set(value):
+		charge_color = value
+		if is_inside_tree():
+			queue_redraw()
 @export var input_enabled := true
+
+## 蓄力条几何：贴在挡板上沿，宽度与挡板一致
+const CHARGE_BAR_HEIGHT := 5.0
+const CHARGE_BAR_GAP := 5.0
 
 @onready var sensor: Area2D = $Sensor
 
@@ -52,6 +68,17 @@ func _physics_process(_delta: float) -> void:
 ## 调用方需要重新计算 left_bound / right_bound。
 func set_width(width: float) -> void:
 	paddle_width = width
+
+
+## 设置蓄力比例（0~1）。Main 在蓄力期间每帧写入。
+## 蓄力条画在挡板本体上（见 _draw）：蓄力、瞄准、发射是同一个动作，
+## 指示器必须贴在动作发起的地方，不能拆到别处让玩家来回找。
+func set_charge(ratio: float) -> void:
+	var clamped := clampf(ratio, 0.0, 1.0)
+	if is_equal_approx(clamped, charge_ratio):
+		return
+	charge_ratio = clamped
+	queue_redraw()
 
 
 ## 按当前宽度重建本体与传感器的碰撞形状。
@@ -83,3 +110,15 @@ func _draw() -> void:
 	draw_rect(rect, color, true)
 	draw_rect(Rect2(rect.position, Vector2(rect.size.x, rect.size.y * 0.35)), color.lightened(0.4), true)
 	draw_rect(rect, color.darkened(0.4), false, 2.0)
+
+	if charge_ratio <= 0.0:
+		return
+
+	# 蓄力条：底槽 + 填充。底槽常驻是必要的，
+	# 否则玩家只能靠「条出现了」判断已经按上，没有参照物就看不出还剩多少。
+	var bar_top := rect.position.y - CHARGE_BAR_GAP - CHARGE_BAR_HEIGHT
+	var bar := Rect2(rect.position.x, bar_top, rect.size.x, CHARGE_BAR_HEIGHT)
+	draw_rect(bar, Color(0, 0, 0, 0.45), true)
+	var fill := Rect2(bar.position, Vector2(bar.size.x * charge_ratio, bar.size.y))
+	draw_rect(fill, charge_color, true)
+	draw_rect(bar, charge_color.darkened(0.3), false, 1.0)

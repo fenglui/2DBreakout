@@ -1,12 +1,16 @@
 extends SceneTree
 ## 开发辅助脚本（不属于游戏流程）：启动 Main.tscn，自动发射并操控挡板，
-## 依次截取“游戏进行中 / 已暂停 / 游戏结束 / 关卡通过 / 第 2 关耐久砖 / 通关”画面
+## 依次截取“蓄力瞄准 / 游戏进行中 / 已暂停 / 游戏结束 / 关卡通过 / 第 2 关耐久砖 / 通关”画面
 ## 保存到 screenshots/，便于人工确认视觉效果。
 ## 必须带窗口运行（不要加 --headless），否则不渲染、截不到图：
 ##   godot --path . --script res://tests/capture_screenshot.gd
 
 const OUT_DIR := "res://screenshots"
 const PANEL_VBOX := "GameOverPanel/Panel/Margin/VBox"
+## “蓄力瞄准”截图的蓄力门槛：攒到 0.3 再截，预测线偏角够明显。
+## 攒到 1.0 会触发自动发射，所以再用帧数上限兜底，防止低帧率下等不到门槛就先满了。
+const CHARGE_SHOT_AT := 0.3
+const CHARGE_SHOT_MAX_FRAMES := 20
 
 
 func _initialize() -> void:
@@ -25,7 +29,18 @@ func _run() -> void:
 	var ball: CharacterBody2D = scene.get_node("Ball")
 	DirAccess.make_dir_recursive_absolute(OUT_DIR)
 
-	_send(&"launch")
+	# 蓄力瞄准：按住 ← 让预测线斜着画出来，同时挡板蓄力条可见
+	_hold(&"move_left")
+	_hold(&"launch")
+	var charged := 0
+	while float(scene.get("_charge")) < CHARGE_SHOT_AT and charged < CHARGE_SHOT_MAX_FRAMES:
+		await physics_frame
+		charged += 1
+	await _shot("charging.png")
+	print("[capture] 蓄力 progress=", scene.get("_charge"), " 预测线点数=",
+		scene.get_node("AimLine").call("get_point_count"))
+	_release(&"launch")
+	_release(&"move_left")
 	for i in 150:
 		paddle.position.x = clampf(ball.position.x, paddle.get("left_bound"), paddle.get("right_bound"))
 		await physics_frame
@@ -126,10 +141,33 @@ func _wait(frames: int) -> void:
 		await physics_frame
 
 
+## 只送「按下」事件（游戏内的继续 / 重开按钮只看按下沿）。
 func _send(action: StringName) -> void:
 	var event := InputEventAction.new()
 	event.action = action
 	event.pressed = true
+	Input.parse_input_event(event)
+
+
+## 按住：两条路径都得走，缺一不可（详见 headless_smoke_test.gd 里同名辅助函数处的注释）。
+## - Input.action_press 更新动作状态，Input.get_axis 才读得到
+## - Input.parse_input_event 把事件派发进 _unhandled_input
+## 少了后者蓄力不会开始，少了前者发射方向永远算成“垂直向上”。
+func _hold(action: StringName) -> void:
+	Input.action_press(action, 1.0)
+	var event := InputEventAction.new()
+	event.action = action
+	event.pressed = true
+	event.strength = 1.0
+	Input.parse_input_event(event)
+
+
+func _release(action: StringName) -> void:
+	Input.action_release(action)
+	var event := InputEventAction.new()
+	event.action = action
+	event.pressed = false
+	event.strength = 0.0
 	Input.parse_input_event(event)
 
 

@@ -9,7 +9,12 @@ extends StaticBody2D
 		if is_inside_tree():
 			_apply_shape()
 @export var points := 10
-@export var color := Color("4cc9f0")
+## 砖色带 setter：换肤流程会直接改这个字段。
+@export var color := Color("4cc9f0"):
+	set(value):
+		color = value
+		if is_inside_tree():
+			queue_redraw()
 ## 击破所需次数（至少 1）
 @export var max_hits := 1:
 	set(value):
@@ -55,20 +60,29 @@ func is_destroyed() -> bool:
 	return hits_left <= 0
 
 
+## 本砖实际绘制用的底色：受损越深越暗。
+func _base_color() -> Color:
+	var damage := maxi(0, max_hits - hits_left)
+	if damage <= 0:
+		return color
+	return color.darkened(0.16 * damage)
+
+
 func _draw() -> void:
 	var rect := Rect2(-size * 0.5, size)
-	var base := color
-	var damage := maxi(0, max_hits - hits_left)
-	if damage > 0:
-		# 越打越暗，直观暴露剩余耐久
-		base = color.darkened(0.16 * damage)
+	var base := _base_color()
 
 	draw_rect(rect, base, true)
 	draw_rect(Rect2(rect.position, Vector2(rect.size.x, rect.size.y * 0.32)), base.lightened(0.35), true)
 	draw_rect(rect, base.darkened(0.35), false, 2.0)
 
+	# 受过伤的砖块描一圈暗红警示边：光靠变暗不够醒目，
+	# 玩家在高速下要能一眼分出「这块还没碎」和「这块快碎了」。
+	if _base_color() != color:
+		draw_rect(rect.grow(-3.0), base.darkened(0.45), false, 1.5)
+
 	# 裂纹：每承受一次击打多一条
-	for i in damage:
+	for i in maxi(0, max_hits - hits_left):
 		var t := 0.22 + 0.26 * i
 		var top := Vector2(rect.position.x + rect.size.x * t, rect.position.y + rect.size.y * 0.12)
 		var bottom := Vector2(rect.position.x + rect.size.x * (t + 0.16), rect.position.y + rect.size.y * 0.88)

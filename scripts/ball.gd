@@ -26,7 +26,13 @@ const MAX_DEFLECT_ANGLE := 1.0
 
 @export var radius := 9.0
 @export var speed := DEFAULT_SPEED
-@export var color := Color("f8f9fa")
+## 球色带 setter：换肤时 Main 会在动画中途改这个字段，
+## 而 _draw 是缓存的，不主动重绘就会一直显示旧颜色。
+@export var color := Color("f8f9fa"):
+	set(value):
+		color = value
+		if is_inside_tree():
+			queue_redraw()
 ## 吸附状态下，球心距离挡板中心的距离（Main 按布局写入）
 @export var stick_offset := 24.0
 ## 球心 Y 超过该值即判定为掉出底部（Main 按布局写入）
@@ -64,12 +70,19 @@ func stick_to(paddle: Node2D) -> void:
 	queue_redraw()
 
 
-## 发射：给一个略微带水平偏移的初速度，避免每次都是笔直向上。
-func launch() -> void:
+## 发射。direction 是「发射方向」，只决定朝向，实际速率仍由 speed 统一控制，
+## 这样蓄力改变角度、关卡改变速率，两者互不干扰。
+## direction 留空时退回旧的随机略微偏水平发射：冒烟测试与调试会无参调用 launch()。
+## 方向由 Main 统一计算（和预测线共用同一个函数），球自己不决定发射角——
+## 否则预测线画出来的落点会和实际落点对不上，瞄准工具就废了。
+func launch(direction: Vector2 = Vector2.ZERO) -> void:
 	if not attached_to_paddle:
 		return
 	attached_to_paddle = false
-	velocity = Vector2(randf_range(-0.22, 0.22), -1.0).normalized() * speed
+	var heading := direction
+	if heading.length_squared() < 0.0001:
+		heading = Vector2(randf_range(-0.22, 0.22), -1.0).normalized()
+	velocity = heading.normalized() * speed
 	# 吸附态画下的发射提示箭头必须主动重绘才会消失，否则会被缓存一路跟着球飞
 	queue_redraw()
 

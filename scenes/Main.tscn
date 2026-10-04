@@ -1,4 +1,4 @@
-[gd_scene load_steps=13 format=3]
+[gd_scene load_steps=16 format=3]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/paddle.gd" id="2_paddle"]
@@ -6,6 +6,11 @@
 [ext_resource type="Script" path="res://scripts/hud.gd" id="4_hud"]
 [ext_resource type="Script" path="res://scripts/game_over_panel.gd" id="5_gameover"]
 [ext_resource type="Script" path="res://scripts/pause_panel.gd" id="6_pause"]
+[ext_resource type="Script" path="res://scripts/aim_line.gd" id="7_aim"]
+[ext_resource type="Script" path="res://scripts/ball_trail.gd" id="8_trail"]
+[ext_resource type="Resource" path="res://scripts/palette_space.tres" id="9_pal_space"]
+[ext_resource type="Resource" path="res://scripts/palette_violet.tres" id="10_pal_violet"]
+[ext_resource type="Resource" path="res://scripts/palette_lava.tres" id="11_pal_lava"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_wall_vertical"]
 size = Vector2(14, 780)
@@ -24,6 +29,7 @@ radius = 9.0
 
 [node name="Main" type="Node2D"]
 script = ExtResource("1_main")
+level_palettes = Array[ExtResource("9_pal_space")]([ExtResource("9_pal_space"), ExtResource("10_pal_violet"), ExtResource("11_pal_lava")])
 
 [node name="Background" type="ColorRect" parent="."]
 z_index = -10
@@ -61,6 +67,14 @@ shape = SubResource("RectangleShape2D_wall_top")
 [node name="Bricks" type="Node2D" parent="."]
 
 [node name="Fx" type="Node2D" parent="."]
+
+[node name="BallTrail" type="Node2D" parent="."]
+z_index = -1
+script = ExtResource("8_trail")
+
+[node name="AimLine" type="Node2D" parent="."]
+z_index = -2
+script = ExtResource("7_aim")
 
 [node name="Paddle" type="CharacterBody2D" parent="."]
 position = Vector2(240, 640)
@@ -142,6 +156,32 @@ text = "第 1 / 3 关"
 horizontal_alignment = 2
 vertical_alignment = 1
 
+[node name="ComboLabel" type="Label" parent="HUD"]
+visible = false
+offset_left = 280.0
+offset_top = 62.0
+offset_right = 464.0
+offset_bottom = 86.0
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.976471, 0.780392, 0.309804, 1)
+theme_override_font_sizes/font_size = 18
+text = "连击 ×3"
+horizontal_alignment = 2
+vertical_alignment = 1
+
+[node name="ComboPop" type="Label" parent="HUD"]
+visible = false
+offset_left = 40.0
+offset_top = 300.0
+offset_right = 440.0
+offset_bottom = 344.0
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.976471, 0.780392, 0.309804, 1)
+theme_override_font_sizes/font_size = 30
+text = "连击 ×3   +30"
+horizontal_alignment = 1
+vertical_alignment = 1
+
 [node name="HintLabel" type="Label" parent="HUD"]
 offset_top = 666.0
 offset_right = 480.0
@@ -149,7 +189,7 @@ offset_bottom = 694.0
 mouse_filter = 2
 theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
 theme_override_font_sizes/font_size = 16
-text = "按 空格 发射球"
+text = "按住 空格 蓄力，松开发射"
 horizontal_alignment = 1
 vertical_alignment = 1
 
@@ -158,10 +198,10 @@ script = ExtResource("5_gameover")
 
 [node name="Panel" type="PanelContainer" parent="GameOverPanel"]
 visible = false
-offset_left = 60.0
-offset_top = 190.0
-offset_right = 420.0
-offset_bottom = 510.0
+offset_left = 40.0
+offset_top = 180.0
+offset_right = 440.0
+offset_bottom = 520.0
 
 [node name="Margin" type="MarginContainer" parent="GameOverPanel/Panel"]
 layout_mode = 2
@@ -191,6 +231,13 @@ horizontal_alignment = 1
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
 text = "最高分 0"
+horizontal_alignment = 1
+
+[node name="StatsLabel" type="Label" parent="GameOverPanel/Panel/Margin/VBox"]
+visible = false
+layout_mode = 2
+theme_override_colors/font_size = 16
+text = "最高连击 ×3 连击结算 2 次"
 horizontal_alignment = 1
 
 [node name="ContinueButton" type="Button" parent="GameOverPanel/Panel/Margin/VBox"]

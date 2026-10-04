@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="Palette" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/palette.gd" id="1_palette"]
+
+[resource]
+script = ExtResource("1_palette")
+background = Color(0.070588, 0.039216, 0.117647, 1)
+row_colors = Array[Color]([Color(0.482353, 0.172549, 0.749020, 1), Color(0.615686, 0.305882, 0.866667, 1), Color(0.780392, 0.490196, 1, 1), Color(0.968627, 0.145098, 0.521569, 1), Color(1, 0.560784, 0.639216, 1), Color(1, 0.784314, 0.341176, 1)])
+ball = Color(0.952941, 0.909804, 1, 1)
+paddle = Color(0.780392, 0.490196, 1, 1)
+accent = Color(1, 0.560784, 0.639216, 1)
+trail = Color(0.780392, 0.490196, 1, 1)
+aim = Color(1, 0.560784, 0.639216, 1)
+text_primary = Color(0.964706, 0.925490, 1, 1)
+text_secondary = Color(0.796078, 0.698039, 0.878431, 1)

@@ -14,6 +14,7 @@ extends SceneTree
 const MAIN_SCENE := "res://scenes/Main.tscn"
 const MAIN_SCRIPT := "res://scripts/main.gd"
 const SFX_SCRIPT := "res://scripts/sfx.gd"
+const BALL_SCRIPT := "res://scripts/ball.gd"
 const SAVE_PATH := "user://2d_breakout_save.cfg"
 const PANEL_VBOX := "GameOverPanel/Panel/Margin/VBox"
 const PAUSE_VBOX := "PausePanel/Panel/Margin/VBox"
@@ -30,6 +31,7 @@ var _start_lives := 0
 var _max_level := 0
 var _wall_thickness := 0.0
 var _view_width := 0.0
+var _view_height := 0.0
 var _view_center := Vector2.ZERO
 var _layer_wall := 0
 var _layer_paddle := 0
@@ -37,6 +39,16 @@ var _layer_brick := 0
 var _layer_ball := 0
 var _level_hits: Array = []
 var _paddle_widths: Array = []
+## —— P0 手感三件套 ——
+var _charge_seconds := 0.0
+var _charge_speed_mul := 0.0
+var _max_charge_tilt := 0.0
+var _aim_bounces := 0
+var _combo_highlight := 0
+var _combo_glow_at := 0
+var _main_script: GDScript = null
+var _sfx_script: GDScript = null
+var _ball_script: GDScript = null
 
 var _checks := 0
 var _fails := 0
@@ -74,10 +86,28 @@ func _bind_constants() -> void:
 	_max_level = int(consts.get("MAX_LEVEL", 0))
 	var view: Vector2 = consts.get("VIEW_SIZE", Vector2.ZERO)
 	_view_width = view.x
+	_view_height = view.y
 	_view_center = view * 0.5
 	_wall_thickness = float(consts.get("WALL_THICKNESS", 0.0))
 	_level_hits = consts.get("LEVEL_BRICK_HITS", [])
 	_paddle_widths = consts.get("PADDLE_WIDTH_STEPS", [])
+	_charge_seconds = float(consts.get("CHARGE_SECONDS", 0.0))
+	_charge_speed_mul = float(consts.get("CHARGE_SPEED_MUL", 0.0))
+	_max_charge_tilt = float(consts.get("MAX_CHARGE_TILT", 0.0))
+	_aim_bounces = int(consts.get("AIM_BOUNCES", 0))
+	_combo_highlight = int(consts.get("COMBO_HIGHLIGHT", 0))
+	_combo_glow_at = int(consts.get("COMBO_GLOW_AT", 0))
+	_main_script = script
+	_sfx_script = load(SFX_SCRIPT) as GDScript
+	_ball_script = load(BALL_SCRIPT) as GDScript
+
+
+## 连击奖励公式直接问 main.gd 要，测试里不维护副本。
+## 走 static 调用而不是抄公式：抄一份的话，改公式的提交会让断言静默变成"错误的期望"。
+func _combo_bonus_for(combo: int) -> int:
+	if _main_script == null or not _main_script.has_method("combo_bonus_for"):
+		return 0
+	return int(_main_script.call("combo_bonus_for", combo))
 
 
 ## 依据 project.godot 的 layer_names 反查位值（第 N 层 -> 1 << (N-1)）。
@@ -113,11 +143,38 @@ func _wait(frames: int) -> void:
 
 
 ## 模拟一次“按下并松开”的动作事件，走完整的输入管线（_unhandled_input）。
+##
+## 必须同时补上 release：发射是「按住蓄力、松手打出去」，
+## 只送按下的话球会一直停在蓄力态（_charging 永为真），后续所有“球在飞行”的断言全废。
 func _send_action(action: StringName) -> void:
+	_hold_action(action)
+	_release_action(action)
+
+
+## 只送按下，用于蓄力相关用例（「按住空格」这个中间态需要单独可达）。
+##
+## 两个动作缺一不可，而且不会互相重复（两条路径实测行为不同，踩过坑）：
+## - Input.action_press 只更新 Input 的内部动作状态，Input.get_axis / is_action_pressed
+##   才读得到，但它【不会】把事件派发给 _input / _unhandled_input。
+##   只用它的话：方向键「按住了」可挡板纹丝不动，游戏自己的输入入口也收不到。
+## - Input.parse_input_event(InputEventAction) 只派发事件，不更新动作状态。
+##   只用它的话：游戏收得到 launch，可 Input.get_axis 恒为 0（幽灵输入）。
+func _hold_action(action: StringName) -> void:
+	Input.action_press(action, 1.0)
 	var event := InputEventAction.new()
 	event.action = action
 	event.pressed = true
 	event.strength = 1.0
+	Input.parse_input_event(event)
+
+
+## 只送松开，配对 _hold_action 使用。
+func _release_action(action: StringName) -> void:
+	Input.action_release(action)
+	var event := InputEventAction.new()
+	event.action = action
+	event.pressed = false
+	event.strength = 0.0
 	Input.parse_input_event(event)
 
 
@@ -505,12 +562,20 @@ func _run() -> void:
 
 	# 走真实的击破路径：同一帧连续击破两块砖 -> Main 加分并判定通关
 	var score_before_win: int = _gi(restarted, "_score")
+	# 这一击之前还挂着未入账的连击（14b 节一连打掉了很多块）。
+	# 结算时 Main 会把它折算成额外分数入账，所以期望值必须把连击奖励算进去——
+	# 公式直接复用 main.gd 的静态函数，测试里不抄第二份副本。
+	var combo_before_win: int = _gi(restarted, "_combo")
 	ball3.brick_hit.emit(last_bricks.get_child(0))
 	ball3.brick_hit.emit(last_bricks.get_child(1))
 	await _wait(3)
 	_check(_gi(restarted, "_state") == _state_won, "最后一关同一帧击破最后两块砖也进入通关状态")
-	_check(_gi(restarted, "_score") == score_before_win + 2 * _points_per_brick,
-		"通关时两块砖都计分（%d -> %d）" % [score_before_win, _gi(restarted, "_score")])
+	var win_expected := score_before_win + 2 * _points_per_brick \
+		+ _combo_bonus_for(combo_before_win + 2)
+	_check(_gi(restarted, "_score") == win_expected,
+		"通关时两块砖都计分，未入账连击同时折算入账（%d -> %d，期望 %d）"
+		% [score_before_win, _gi(restarted, "_score"), win_expected])
+	_check(_gi(restarted, "_combo") == 0, "通关结算后待结算连击清零")
 	_check(restarted.get_node("GameOverPanel/Panel").visible, "显示通关结算面板")
 	_check(restarted.get_node(PANEL_VBOX + "/TitleLabel").text == "通关！",
 		"结算面板标题切换为“通关！”")
@@ -655,7 +720,423 @@ func _run() -> void:
 			"卡死脱离落点在砖墙下方空场（%.1f > 砖墙底边 %.1f，且 < 挡板 %.1f）" % [
 				unstick_y, wall_bottom, env_paddle.position.y])
 
+	# ---------- 21. P0 手感三件套：蓄力发射 / 预测线 / 连击 / 换肤 ----------
+	# 放最后，且【自己 new 一个场景】，不复用 restarted2：
+	# 上一节让球飞了 400 帧，实例很可能已经掉光生命进入 GAME_OVER。
+	# 而 GAME_OVER 下按 launch 走的是「结算后重开」分支（_on_continue_requested），
+	# 蓄力根本不会被触发，缓存下来的节点引用也全部指向被释放的旧场景。
+	var p0_scene: Node = (load(MAIN_SCENE) as PackedScene).instantiate()
+	root.add_child(p0_scene)
+	await _wait(3)
+	_check(_gi(p0_scene, "_state") == _state_playing,
+		"P0 用例的专用场景处于 Playing 态（%d）" % _gi(p0_scene, "_state"))
+	await _finish_p0_suite(p0_scene)
+
+
+## 跑完 P0 用例后释放专用场景，避免与前面各节的实例叠加。
+func _finish_p0_suite(scene: Node) -> void:
+	await _run_p0_suite(scene)
+	scene.queue_free()
+	await _wait(2)
+
 	_finish()
+
+
+## 把球恢复到「吸附在挡板上、等待发射」的干净状态。
+## 上一节长时间飞行后球可能正在下落，直接改 y 不会触发掉球判定（吸附态每帧都被拉回），
+## 所以先确保球真的在飞行中。
+func _ensure_attached(scene: Node) -> CharacterBody2D:
+	var ball: CharacterBody2D = scene.get_node("Ball") as CharacterBody2D
+	if not bool(ball.get("attached_to_paddle")):
+		await _wait(2)
+	if not bool(ball.get("attached_to_paddle")):
+		ball.call("stick_to", scene.get_node("Paddle"))
+		await _wait(2)
+	return ball
+
+
+func _run_p0_suite(scene: Node) -> void:
+	var p_ball := await _ensure_attached(scene)
+	var p_paddle: CharacterBody2D = scene.get_node("Paddle") as CharacterBody2D
+	var aim_line: Node2D = scene.get_node("AimLine")
+	var ball_trail: Node2D = scene.get_node("BallTrail")
+	var background := scene.get_node("Background") as ColorRect
+
+	# ---------- 21a. Palette：配置存在 / 每关不同 / library() 不共享实例 ----------
+	# 不要求恰好一套/关：配 fewer 套时 current_palette() 会按取模循环，行为仍然正确。
+	# 这里守的是「换了皮」这件事本身——至少两套，且两两不同。
+	var level_palettes: Array = scene.get("level_palettes")
+	_check(level_palettes.size() >= 2,
+		"Main 至少配了 2 套关卡配色用于换肤（实际 %d 套）" % level_palettes.size())
+	var distinct_bg := {}
+	for i in level_palettes.size():
+		distinct_bg[(level_palettes[i] as Palette).background] = true
+	_check(distinct_bg.size() == level_palettes.size(),
+		"每套配色的背景色互不相同（%d 套 -> %d 种）" % [level_palettes.size(), distinct_bg.size()])
+
+	# library() 必须每次新建：共享 Resource 会让「改 A 关的色把 B 关也改了」
+	var lib_a := Palette.library()
+	var lib_b := Palette.library()
+	_check(lib_a.size() == lib_b.size() and lib_a.size() > 0,
+		"Palette.library() 每次返回同样套数的配色（%d / %d 套）" % [lib_a.size(), lib_b.size()])
+	_check(lib_a[0] != lib_b[0], "Palette.library() 每次返回全新实例（未共享 Resource）")
+	(lib_a[0] as Palette).background = Color("010203")
+	_check((lib_b[0] as Palette).background != Color("010203"),
+		"改一份 library() 配色不会污染另一份（Resource 共享坑的回归守卫）")
+
+	# ---------- 21b. 蓄力：按下 -> 蓄力条涨 / 预测线出现，但球还没飞 ----------
+	# 只送按下、不送松开：这是蓄力中间态，也是第 5 节那 4 条失败的根因。
+	_hold_action(&"launch")
+	await _wait(1)
+	_check(_gi(scene, "_charging") == 1, "按住 launch 进入蓄力态")
+	_check(bool(p_ball.get("attached_to_paddle")), "蓄力中球仍吸附在挡板上（按下不发射）")
+
+	# 蓄力条与预测线都要真的画出来：这两条是「玩家能瞄」的全部依据
+	await _wait(3)
+	var charge_mid := float(scene.get("_charge"))
+	_check(charge_mid > 0.0 and charge_mid <= 1.0,
+		"蓄力进度随时间增长且不超过 1（%.2f）" % charge_mid)
+	_check(float(p_paddle.get("charge_ratio")) > 0.0,
+		"挡板蓄力条同步点亮（charge_ratio=%.2f）" % float(p_paddle.get("charge_ratio")))
+
+	# 预测线必须真的打在什么东西上。只断言「点数 >= 2」太松：
+	# 线一路飞出屏幕没撞到任何东西时也是 2 个点，那不叫预测。
+	# 球贴着挡板向上打必然先撞上砖墙底面，反弹 >= 1 才是有效断言
+	#（注意：这里最多也就 1 次反弹，撞完砖底就垂直掉出场地了，
+	#  所以下面另有一条与砖块布局无关的用例专门验多段反射）。
+	var aim_points := int(aim_line.call("get_point_count"))
+	var aim_bounces := int(aim_line.call("get_bounce_count"))
+	var aim_segments := int(aim_line.call("get_segment_count"))
+	_check(aim_bounces >= 1,
+		"蓄力时预测线真的打在墙/砖上而不是直接飞出场地（%d 次反射 / %d 个点）"
+		% [aim_bounces, aim_points])
+	_check(aim_segments == aim_bounces or aim_segments == aim_bounces + 1,
+		"预测线段数与反射次数自洽（%d 段 / %d 次反射）" % [aim_segments, aim_bounces])
+
+	# 预测线掩码只能含墙与砖：算上挡板的话线会在脚边撞上自己，画出一段无意义短线
+	var aim_masks: Dictionary = (load(MAIN_SCRIPT) as GDScript).get_script_constant_map()
+	var aim_mask: int = int(aim_masks.get("AIM_MASK_WALL", 0)) | int(aim_masks.get("AIM_MASK_BRICK", 0))
+	_check(aim_mask == _layer_wall | _layer_brick,
+		"预测线掩码只含 Wall/Brick（%d，期望 %d）"
+		% [aim_mask, _layer_wall | _layer_brick])
+	# 这是配置与实现的一致性检查：AIM_BOUNCES 一旦超过 MAX_SEGMENTS，
+	# predict() 会静默钳到上限，表现为「配了 5 段却只看到 4 段」而不是报错。
+	_check(_aim_bounces > 0 and _aim_bounces <= AimLine.MAX_SEGMENTS,
+		"Main 请求的反射次数不超过 AimLine 的实现上限（%d <= %d）"
+		% [_aim_bounces, AimLine.MAX_SEGMENTS])
+
+	# 多段反射本身：单独喂一条「贴地平飞」的射线再验一遍。
+	# y 取砖墙下方，砖完全够不着；掩码又只有墙，排除了挡板与球。
+	# 于是这条射线只会在左右墙之间来回，反弹次数完全由 AIM_BOUNCES 决定——
+	# 与砖块布局、关卡进度都无关，测的正是 predict() 与 _draw() 的分段本身。
+	aim_line.call("predict", Vector2(_view_center.x, _view_height - 30.0),
+		Vector2.RIGHT, _aim_bounces, int(aim_masks.get("AIM_MASK_WALL", 0)), 0.55)
+	var flat_bounces := int(aim_line.call("get_bounce_count"))
+	var flat_segments := int(aim_line.call("get_segment_count"))
+	_check(flat_bounces == _aim_bounces and flat_segments == _aim_bounces,
+		"贴地平飞的预测线在左右墙之间反射满 %d 次（%d 次反射 / %d 段 / %d 个点）"
+		% [_aim_bounces, flat_bounces, flat_segments, int(aim_line.call("get_point_count"))])
+
+	# ---------- 21c. 蓄满自动发射：按住不放也会出球 ----------
+	# 不做自动发射的话，玩家可以把空格按住不放看着满蓄力条却不发球，像卡住。
+	# 蓄力进度在 _process 里按 delta 累加，time_scale=4.0 会把 delta 一起放大 4 倍，
+	# 所以实际需要的物理帧数是 charge_seconds / (1/60) / 4，再留足余量。
+	var full_charge_frames := int(ceil(_charge_seconds * 60.0 / 4.0)) + 12
+	await _wait(full_charge_frames)
+	_check(not bool(p_ball.get("attached_to_paddle")),
+		"蓄满后自动发射，不必一直按住空格（等 %d 帧）" % full_charge_frames)
+	_check(_gi(scene, "_charging") == 0, "自动发射后回到未蓄力态")
+	_check(int(aim_line.call("get_point_count")) == 0, "发射后预测线清空")
+
+	# ---------- 21d. 发射方向与速度由蓄力强度决定 ----------
+	# 竖直上弹是原版行为，只有蓄力才能选角度与提速——这一条正是 P0 的核心收益。
+	#
+	# 用「半蓄力」而不是满蓄力：满蓄力会被 21c 的自动发射抢走，根本轮不到这里松手。
+	await _ensure_attached(scene)
+	var y_stuck := p_ball.position.y
+	_hold_action(&"move_left")
+	_hold_action(&"launch")
+	await _wait(2)
+	var power := float(scene.get("_charge"))
+	_check(_gi(scene, "_charging") == 1 and power > 0.0 and power < 1.0,
+		"半蓄力态仍在蓄力中（power=%.3f，未被自动发射抢走）" % power)
+	_check(is_equal_approx(p_ball.position.y, y_stuck),
+		"蓄力期间球还钉在挡板上没动（y %.1f -> %.1f）" % [y_stuck, p_ball.position.y])
+	_release_action(&"launch")
+	# 必须等一拍再读速度：Input.parse_input_event 只把事件缓冲到下一帧才送进
+	# _unhandled_input（同一帧同步读的话拿到的是吸附态的 (0, 0)，不是发射速度）。
+	# 一拍是安全的：球刚出手只移动 speed/60 ≈ 8px，离砖墙还有 300px，不会碰到东西改方向。
+	await _wait(1)
+	var vel: Vector2 = p_ball.velocity
+	_release_action(&"move_left")
+
+	# 这里不去猜「松手瞬间的 power 到底是多少」：蓄力进度逐帧累加，
+	# 上面的 await 还会让 power 再涨一帧，按测试读到的值算期望必然对不上（实测差一倍）。
+	# 改成验证不随帧时序漂移的不变量：发射角与球速必须来自同一个 power，且 0 < power < 1。
+	var level_speeds: Array = aim_masks.get("LEVEL_BALL_SPEED", [])
+	_check(level_speeds.size() > 0 and _charge_speed_mul > 1.0,
+		"关卡球速表与蓄力提速倍率都已配置（%d 档速率，满蓄力 ×%.2f）"
+		% [level_speeds.size(), _charge_speed_mul])
+	var base_speed := float(level_speeds[(_gi(scene, "_level") - 1) % maxi(1, level_speeds.size())])
+	# 反解 power：speed = base × lerp(1.0, CHARGE_SPEED_MUL, power)
+	var power_used := (vel.length() / base_speed - 1.0) / (_charge_speed_mul - 1.0)
+	var tilt: float = absf(atan2(vel.x, -vel.y)) if vel.y < 0.0 else 99.0
+	_check(power_used > 0.0 and power_used < 1.0,
+		"半蓄力发射的球速落在「基础速」与「满蓄力速」之间（power=%.3f，%.1f ~ %.1f）"
+		% [power_used, base_speed, base_speed * _charge_speed_mul])
+	# 角度必须按同一个 power 偏转：按住左所以 x 分量为负，倾角 = power × MAX_CHARGE_TILT
+	_check(vel.x < 0.0 and absf(tilt - power_used * _max_charge_tilt) < 0.01,
+		"发射角 == power × MAX_CHARGE_TILT 且与球速同源（实测 %.4f，期望 %.4f）"
+		% [tilt, power_used * _max_charge_tilt])
+	_check(tilt < _max_charge_tilt - 0.01,
+		"半蓄力的发射角明显小于满蓄力（%.4f < %.4f），角度可控而非固定"
+		% [tilt, _max_charge_tilt])
+	await _wait(1)
+	_check(not bool(p_ball.get("attached_to_paddle")) and p_ball.position.y < y_stuck - 1.0,
+		"松手后球真的斜飞出去（y %.1f -> %.1f）" % [y_stuck, p_ball.position.y])
+
+	# ---------- 21e. 拖尾：飞行中增长、吸附时清空 ----------
+	# 蓄力待发时球不动，画拖尾就是一坨原地堆积的色块
+	var trail_after_launch := int(ball_trail.call("get_point_count"))
+	await _wait(6)
+	var trail_grown := int(ball_trail.call("get_point_count"))
+	_check(trail_grown > trail_after_launch,
+		"球飞行时拖尾持续增长（%d -> %d）" % [trail_after_launch, trail_grown])
+	await _ensure_attached(scene)
+	await _wait(2)
+	_check(int(ball_trail.call("get_point_count")) == 0,
+		"球吸附回挡板后拖尾清空（剩余 %d 个点）" % int(ball_trail.call("get_point_count")))
+
+	# ---------- 21f. 连击：回挡板入账 / 掉球作废 ----------
+	# 走真实信号，不直接改 _combo：combo 的产生路径只有 _on_brick_hit 一条。
+	#
+	# 关键：先把球的物理处理关掉。不关的话球在飞行途中会自然撞砖，
+	# _combo 与 _score 会被自然碰撞污染，「连击恰好等于 4」这种断言就变成 flaky。
+	# 关物理只冻结球自己（move_and_slide / 碰撞），Main 仍照常处理我们手动 emit 的信号。
+	p_ball.set_physics_process(false)
+	# 前面 21b~21e 让球真飞了一段，途中自然撞砖已经攒了连击。
+	# 不清零的话「连击恰好等于 4」这种断言永远对不上，且回挡板入账时
+	# 会把上一段飞行遗留的连击一起算进去。
+	scene.set("_combo", 0)
+	scene.call("_update_hud")
+	await _wait(1)
+	var combo_bricks: Node2D = scene.get_node("Bricks")
+	# 全部调到「再挨一下就碎」，这样点几下就能攒够连击，不用真打完 48 块
+	for child in combo_bricks.get_children():
+		(child as Brick).max_hits = 1
+		(child as Brick).hits_left = 1
+	await _wait(2)
+	var score_at_combo: int = _gi(scene, "_score")
+	# 每次都取最后一块：被击破的那块 queue_free() 到帧末才真正移除，
+	# 中间这一帧它仍留在子节点里，重复取到同一块会少算连击。
+	# 打击次数按「场上还剩几块」封顶：前面几节让球真飞过，砖墙可能已经残破。
+	var hits := mini(4, combo_bricks.get_child_count())
+	for i in hits:
+		var target := combo_bricks.get_child(combo_bricks.get_child_count() - 1)
+		(target as Brick).hits_left = 1
+		p_ball.emit_signal("brick_hit", target)
+		await _wait(1)
+	var combo_built: int = _gi(scene, "_combo")
+	_check(combo_built == hits, "连续击破 %d 块砖累计 %d 连击（实际 %d）"
+		% [hits, hits, combo_built])
+	_check(_gi(scene, "_score") == score_at_combo + hits * _points_per_brick,
+		"连击未入账前分数只有砖块基础分（%d -> %d）"
+		% [score_at_combo, _gi(scene, "_score")])
+	_check(_combo_highlight > 0, "连击显示阈值已配置（COMBO_HIGHLIGHT=%d）" % _combo_highlight)
+	_check(_combo_glow_at >= _combo_highlight,
+		"拖尾增粗阈值不低于连击显示阈值（%d >= %d）" % [_combo_glow_at, _combo_highlight])
+	# HUD 只在达到阈值后才显示连击：1 连击每次都在闪，纯噪音。
+	# 双向都验：低于阈值隐藏、达到阈值显示且带上数字。
+	var combo_label: Label = scene.get_node("HUD/ComboLabel")
+	scene.set("_combo", 0)
+	scene.call("_update_hud")
+	await _wait(1)
+	_check(not combo_label.visible, "连击为 0 时 HUD 不显示连击")
+	scene.set("_combo", _combo_highlight - 1)
+	scene.call("_update_hud")
+	await _wait(1)
+	_check(not combo_label.visible,
+		"连击未达 COMBO_HIGHLIGHT 时 HUD 隐藏连击（%d < %d）"
+		% [_combo_highlight - 1, _combo_highlight])
+	scene.set("_combo", _combo_highlight)
+	scene.call("_update_hud")
+	await _wait(1)
+	_check(combo_label.visible and combo_label.text.contains(str(_combo_highlight)),
+		"连击达到阈值时 HUD 显示连击数（%s）" % combo_label.text)
+	scene.set("_combo", combo_built)
+
+	# 回挡板 = 把这次飞行的连击折算成分数入账
+	var expected_bonus := _combo_bonus_for(combo_built)
+	_check(expected_bonus > 0, "%d 连击的奖励公式给出正奖励（%d）" % [combo_built, expected_bonus])
+	p_ball.emit_signal("paddle_hit")
+	await _wait(2)
+	_check(_gi(scene, "_score") == score_at_combo + hits * _points_per_brick + expected_bonus,
+		"球回挡板时连击折算入账（%d -> %d，期望 %d）"
+		% [score_at_combo, _gi(scene, "_score"),
+			score_at_combo + hits * _points_per_brick + expected_bonus])
+	_check(_gi(scene, "_combo") == 0, "入账后连击计数清零")
+
+	# 掉球 = 这段连击整段作废，一分不加（combo 的风险面）
+	var score_before_drop: int = _gi(scene, "_score")
+	var hits2 := mini(3, combo_bricks.get_child_count())
+	for i in hits2:
+		var target2 := combo_bricks.get_child(combo_bricks.get_child_count() - 1)
+		(target2 as Brick).hits_left = 1
+		p_ball.emit_signal("brick_hit", target2)
+		await _wait(1)
+	_check(_gi(scene, "_combo") == hits2, "掉球前又攒了 %d 连击（实际 %d）"
+		% [hits2, _gi(scene, "_combo")])
+	p_ball.emit_signal("fell_out_of_playfield")
+	await _wait(3)
+	_check(_gi(scene, "_combo") == 0, "掉球后连击整段作废（清零）")
+	_check(_gi(scene, "_score") == score_before_drop + hits2 * _points_per_brick,
+		"掉球时连击不入账，分数只含砖块基础分（%d -> %d）"
+		% [score_before_drop, _gi(scene, "_score")])
+	# 解冻：后面几节还要正常飞行
+	p_ball.set_physics_process(true)
+
+	# ---------- 21g. 换肤真的换了背景色 ----------
+	# 背景是 tween 过渡的（PALETTE_FADE_TIME），要给够帧才能读到终值
+	await _ensure_attached(scene)
+	var bg_level_1 := background.color
+	var palette_level_1: Palette = scene.call("current_palette")
+	scene.set("_level", 2)
+	scene.call("_start_level")
+	await _wait(40)
+	var palette_level_2: Palette = scene.call("current_palette")
+	_check(palette_level_2 != palette_level_1, "第 2 关取到另一套配色")
+	_check(background.color != bg_level_1,
+		"进入第 2 关后背景色改变（%s -> %s）" % [bg_level_1.to_html(false), background.color.to_html(false)])
+	_check(background.color.is_equal_approx((palette_level_2 as Palette).background),
+		"背景色收敛到第 2 关配色（%s）" % background.color.to_html(false))
+	scene.set("_level", 1)
+	scene.call("_start_level")
+	await _wait(40)
+	_check(background.color.is_equal_approx(bg_level_1),
+		"回到第 1 关后背景色还原（%s）" % background.color.to_html(false))
+
+	# 换肤不只换背景：Palette 里声明的每个字段都要真的落到画面上。
+	# Palette 里躺着没人用的字段是典型的「配置看起来很全、实际改了没反应」，
+	# 所以这里逐项核对，而不是只查背景色。
+	scene.set("_level", 3)
+	scene.call("_start_level")
+	await _wait(40)
+	var palette_level_3: Palette = scene.call("current_palette")
+	var hud := scene.get_node("HUD")
+	var score_label := hud.get_node("ScoreLabel") as Label
+	var best_label := hud.get_node("BestLabel") as Label
+	var aim_line_now: AimLine = scene.get_node("AimLine")
+	var trail_now: BallTrail = scene.get_node("BallTrail")
+	_check(p_ball.color.is_equal_approx(palette_level_3.ball),
+		"球色收敛到第 3 关配色（%s）" % p_ball.color.to_html(false))
+	_check(p_paddle.color.is_equal_approx(palette_level_3.paddle),
+		"挡板色收敛到第 3 关配色（%s）" % p_paddle.color.to_html(false))
+	_check(aim_line_now.color.is_equal_approx(palette_level_3.aim),
+		"预测线用调色板的 aim 色而不是球的颜色（%s）"
+		% aim_line_now.color.to_html(false))
+	_check(trail_now.base_color.is_equal_approx(palette_level_3.trail),
+		"拖尾基色收敛到调色板的 trail 色（%s）" % trail_now.base_color.to_html(false))
+	# base_color 还不等于「玩家看到的颜色」：Main 每帧按连击强度从基色派生 color，
+	# 而球吸附在挡板上时 _physics_process 直接 return，根本不会去写 color。
+	# 所以实际颜色必须在球真的在飞的时候采，否则测的是没人覆盖的残留值。
+	await _ensure_attached(scene)
+	p_ball.call("launch")
+	await _wait(8)
+	_check(trail_now.get_point_count() > 0,
+		"球飞行中拖尾确实有点可画（%d 个点）" % trail_now.get_point_count())
+	_check(trail_now.color.is_equal_approx(palette_level_3.trail),
+		"飞行中的拖尾用的仍是调色板 trail 色（%s）" % trail_now.color.to_html(false))
+	_check(p_paddle.charge_color.is_equal_approx(palette_level_3.accent),
+		"蓄力条吃 accent 色（%s）" % p_paddle.charge_color.to_html(false))
+	_check(score_label.get_theme_color("font_color").is_equal_approx(palette_level_3.text_primary),
+		"HUD 主要文字色换成 text_primary（%s）"
+		% score_label.get_theme_color("font_color").to_html(false))
+	_check(best_label.get_theme_color("font_color").is_equal_approx(palette_level_3.text_secondary),
+		"HUD 次要文字色换成 text_secondary（%s）"
+		% best_label.get_theme_color("font_color").to_html(false))
+	# 结算面板在 show_result() 里吃同一套配色，顺手确认它没被面板自身的主题盖回去
+	var panel := scene.get_node("GameOverPanel")
+	panel.call("show_result", 0, 0, false, _state_game_over, 3, 4, 1, palette_level_3)
+	await _wait(1)
+	var stats_label := panel.get_node("Panel/Margin/VBox/StatsLabel") as Label
+	_check(stats_label.get_theme_color("font_color").is_equal_approx(palette_level_3.accent),
+		"结算面板连击统计行吃 accent 色（%s）"
+		% stats_label.get_theme_color("font_color").to_html(false))
+	panel.call("hide_result")
+
+	scene.set("_level", 1)
+	scene.call("_start_level")
+	await _wait(40)
+
+	# ---------- 21h. Ball.launch() 无参调用仍然可用（向后兼容） ----------
+	# 旧调用点（以及外部 mod / 存档回放）都是 ball.launch()，
+	# 加了 direction 参数后不保留默认值就会全部崩掉。
+	_check(_ball_launch_arity() == 0,
+		"Ball.launch() 的必填参数为 0 个（无参调用合法，实际 %d）" % _ball_launch_arity())
+	await _ensure_attached(scene)
+	p_ball.call("launch")
+	await _wait(2)
+	_check(not bool(p_ball.get("attached_to_paddle")), "Ball.launch() 无参调用仍能把球打出去")
+	var random_dir: Vector2 = p_ball.velocity.normalized()
+	_check(random_dir.y < 0.0, "无参 launch() 仍朝上方飞行（y 分量 %.2f）" % random_dir.y)
+	var ball_consts: Dictionary = _ball_script.get_script_constant_map() \
+		if _ball_script != null else {}
+	var launch_min: float = float(ball_consts.get("MIN_ANGLE_FROM_HORIZONTAL", 0.0))
+	var launch_max: float = float(ball_consts.get("MAX_ANGLE_FROM_HORIZONTAL", 0.0))
+	# 无参 launch() 走的随机方向是 Vector2(randf_range(-0.22, 0.22), -1)，
+	# 正摆时角度可到 1.57 > 上界 1.40，靠 _clamp_direction() 拉回来——
+	# 这条断言守的就是「兜底钳制真的生效」。
+	# 比较留 1e-6 容差：钳到边界上再 atan2 读回来会有最后一位的浮点误差。
+	var random_angle := atan2(absf(random_dir.y), absf(random_dir.x))
+	_check(launch_min > 0.0 and launch_max > launch_min
+			and random_angle >= launch_min - 1e-6 and random_angle <= launch_max + 1e-6,
+		"无参 launch() 的随机角度被钳回包络内（%.4f 弧度，区间 %.2f ~ %.2f）"
+		% [random_angle, launch_min, launch_max])
+
+	# ---------- 21i. Sfx.play(preset, pitch) 的 pitch 只缩放本声部的 f0/f1 ----------
+	# 不用 playback.pitch_scale：那是整个播放器的属性，会把同时在响的其它音效
+	# （掉命、砖裂）一起拖慢，语义就串了。
+	# 这里走 pitched_notes() 这个纯函数验证：无头模式下音频驱动是 Dummy，
+	# play() 第一行就 return，靠调 play() 根本验证不到缩放。
+	var combo_notes: Array = _sfx_script.call("pitched_notes", "combo", 1.0)
+	var half_notes: Array = _sfx_script.call("pitched_notes", "combo", 0.5)
+	var combo_preset: Array = _sfx_script.get_script_constant_map().get("PRESETS", {}).get("combo", [])
+	_check(combo_notes.size() == combo_preset.size() and not combo_notes.is_empty(),
+		"pitched_notes() 返回的音符数与预设一致（%d / %d）"
+		% [combo_notes.size(), combo_preset.size()])
+	var half_ok := not combo_notes.is_empty()
+	for i in mini(combo_notes.size(), half_notes.size()):
+		if absf(float(combo_notes[i]["f0"]) - 2.0 * float(half_notes[i]["f0"])) > 0.01 \
+				or absf(float(combo_notes[i]["f1"]) - 2.0 * float(half_notes[i]["f1"])) > 0.01:
+			half_ok = false
+			break
+	_check(half_ok, "pitch=0.5 时 f0/f1 正好减半（只缩放频率，不改音量与包络）")
+	_check(float(half_notes[0]["vol"]) == float(combo_notes[0]["vol"])
+			and float(half_notes[0]["dur"]) == float(combo_notes[0]["dur"]),
+		"pitch 缩放不改动 vol / dur（连击变高但不该变得更响或更长）")
+	# 下限保护：pitch 过小会让频率掉到次声，听感反而是「没声音」
+	var tiny_notes: Array = _sfx_script.call("pitched_notes", "combo", 0.01)
+	_check(float(tiny_notes[0]["f0"]) == float(combo_notes[0]["f0"]) * 0.25,
+		"pitch 低于 0.25 时被夹到下限，避免次声（%.1f）" % float(tiny_notes[0]["f0"]))
+	# pitched_notes 不得污染 PRESETS 本身
+	var reread: Array = _sfx_script.get_script_constant_map().get("PRESETS", {}).get("combo", [])
+	_check(float(reread[0]["f0"]) == float(combo_preset[0]["f0"]),
+		"pitched_notes() 不修改 PRESETS 常量表（改一份不会污染下一次）")
+
+
+## Ball.launch() 的必填参数个数（无默认值的参数数）。
+## launch() 加了 direction 参数后必须仍是 0 个必填，否则旧的 ball.launch() 调用点全崩。
+func _ball_launch_arity() -> int:
+	var ball_script := load("res://scripts/ball.gd") as GDScript
+	if ball_script == null:
+		return -1
+	for method: Dictionary in ball_script.get_script_method_list():
+		if String(method.name) != "launch":
+			continue
+		var args: Array = method.get("args", [])
+		var defaults: Array = method.get("default_args", [])
+		return maxi(0, args.size() - defaults.size())
+	return -1
 
 
 func _finish() -> void:

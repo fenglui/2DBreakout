@@ -22,8 +22,9 @@ extends Node
 ## - 播放类型属性叫 playback_type（旧文档的 playback_mode 在 4.7 已删除），枚举挂在
 ##   AudioServer 上：PLAYBACK_TYPE_DEFAULT / STREAM / SAMPLE。Web 平台必须用 STREAM。
 ## - GDScript 里没有 AudioFrame 类型，音频帧用 Vector2 表示：x = 左声道，y = 右声道
-## - GDScript 逐样本混音是性能敏感路径：采样率取 22050（本项目最高基频 1318Hz，足够），
-##   声部用带成员变量的内部类而不是 Dictionary，避免每样本十次字典取值。
+## - GDScript 逐样本混音是性能敏感路径：采样率取 22050（连击音效按 pitch=2.0 拉到
+##   2640Hz 仍远低于 Nyquist），声部用带成员变量的内部类而不是 Dictionary，
+##   避免每样本十次字典取值。
 
 const MIX_RATE := 22050
 ## 同时发声的最大音数，防止极端情况下声部无限增长
@@ -57,6 +58,17 @@ const PRESETS := {
 		{"f0": 420.0, "f1": 300.0, "dur": 0.05, "wave": "square", "vol": 0.10, "delay": 0.02},
 	],
 	"launch": [{"f0": 330.0, "f1": 900.0, "dur": 0.16, "wave": "sine",   "vol": 0.26, "delay": 0.0}],
+	# 蓄力：低频持续音，用短促的单音近似「能量聚集」的听感
+	"charge": [
+		{"f0": 200.0, "f1": 520.0, "dur": 0.10, "wave": "sawtooth", "vol": 0.10, "delay": 0.00},
+		{"f0": 400.0, "f1": 780.0, "dur": 0.08, "wave": "sine",     "vol": 0.08, "delay": 0.07},
+	],
+	# 连击入账：上行琶音，音高随连击数升高（play 的 pitch 参数）
+	"combo": [
+		{"f0": 660.0, "f1": 660.0, "dur": 0.07, "wave": "square", "vol": 0.16, "delay": 0.00},
+		{"f0": 880.0, "f1": 880.0, "dur": 0.07, "wave": "square", "vol": 0.16, "delay": 0.06},
+		{"f0": 1320.0, "f1": 1320.0, "dur": 0.12, "wave": "sine",  "vol": 0.18, "delay": 0.12},
+	],
 	"life":   [
 		{"f0": 320.0, "f1": 90.0, "dur": 0.42, "wave": "sawtooth", "vol": 0.26, "delay": 0.0},
 		{"f0": 160.0, "f1": 60.0, "dur": 0.30, "wave": "sine",     "vol": 0.18, "delay": 0.06},
@@ -172,13 +184,37 @@ func shutdown() -> void:
 	_playback = null
 
 
+## 按音高倍率缩放预设里的音符，返回一份新的音符数组（纯函数，不碰播放器）。
+##
+## 直接缩放 f0/f1 而不是改 playback.pitch_scale：后者作用于整个播放器，
+## 会把正在播放的其它音效（掉命、砖裂）一起拉高，语义就串了。
+##
+## 抽成 static 有两个原因：
+## 1) 无头模式下 _playback 为 null，play() 第一行就返回，光靠调用 play()
+##    根本验证不到缩放逻辑——这正是最容易悄悄坏掉的部分。
+## 2) 缩放规则（0.25 下限）单独可测，不用非得开音频设备。
+static func pitched_notes(preset: String, pitch: float) -> Array:
+	# 夹住下限：pitch 过小会让频率掉到 20Hz 以下变成次声，听感反而是「没声音」；
+	# 上限交给调用方的业务常量控制，不在这里替它做主。
+	var ratio := maxf(pitch, 0.25)
+	var notes: Array = []
+	for note: Dictionary in PRESETS.get(preset, []):
+		var scaled := note.duplicate()
+		scaled["f0"] = float(note["f0"]) * ratio
+		scaled["f1"] = float(note["f1"]) * ratio
+		notes.append(scaled)
+	return notes
+
+
 ## 播放一个预设音效。预设名不存在时静默忽略。
-## 无头模式（_playback 为 null）下直接返回，不积累声部。
-func play(preset: String) -> void:
+## 无头模式（_playback == null）下直接返回，不积累声部。
+##
+## pitch 是音高倍率（1.0 = 原音），供连击越高音调越高的听感使用。
+func play(preset: String, pitch: float = 1.0) -> void:
 	if not enabled or _playback == null:
 		return
-	var notes: Array = PRESETS.get(preset, [])
-	for note in notes:
+	for note in pitched_notes(preset, pitch):
+		# 声部上限：超出就丢最早的那个，宁可截断也不让 voices 无界增长
 		if _voices.size() >= MAX_VOICES:
 			_voices.pop_front()
 		var voice := Voice.new()
