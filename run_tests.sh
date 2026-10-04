@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
-# 一键验证：--check-only 静态门禁 + 无头冒烟测试（Linux / macOS / CI 版）。
+# 一键验证：资源导入 + --check-only 静态门禁 + 无头冒烟测试（Linux / macOS / CI 版）。
 # Windows 下请用同目录的 run_tests.ps1，行为与退出码完全一致。
+# 第 0 步的 --import 用于生成 class_name 全局类缓存，全新检出的仓库必须有它。
 #
 # 用法：
 #   ./run_tests.sh              静态检查 + 冒烟测试
 #   ./run_tests.sh --strict     GDScript warning 也计为失败
 #   ./run_tests.sh --skip-smoke 只做静态检查
 #   ./run_tests.sh --detailed   打印 Godot 完整输出
+#   ./run_tests.sh --windowed   追加窗口运行冒烟（音频开播路径，需要显示器）
 #
 # 退出码：0 全部通过 / 1 检查失败 / 2 未找到 Godot
 #
@@ -19,12 +21,14 @@ set -u
 STRICT=0
 SKIP_SMOKE=0
 DETAILED=0
+WINDOWED=0
 
 for arg in "$@"; do
 	case "$arg" in
 		--strict) STRICT=1 ;;
 		--skip-smoke) SKIP_SMOKE=1 ;;
 		--detailed) DETAILED=1 ;;
+		--windowed) WINDOWED=1 ;;
 		-h|--help) sed -n '2,20p' "$0"; exit 0 ;;
 		*) echo "未知参数：$arg" >&2; exit 2 ;;
 	esac
@@ -68,6 +72,20 @@ if [ -z "${GODOT:-}" ]; then
 	exit 2
 fi
 echo "Godot:     $GODOT"
+echo ""
+
+# ---------- 0. 资源导入 ----------
+# class_name 的全局类缓存（.godot/global_script_class_cache.cfg）由 Godot 的导入流程生成。
+# 全新检出的仓库没有 .godot/，此时 --check-only 会因为找不到跨脚本引用的 class_name 而报错，
+# 因此先跑一次导入（CI 与新克隆的本地环境都依赖这一步）。
+echo "== 0/2 资源导入（生成 class_name 全局类缓存）=="
+import_out="$("$GODOT" --headless --path . --import 2>&1)"
+if [ ! -f ".godot/global_script_class_cache.cfg" ]; then
+	printf '%s\n' "$import_out" | sed 's/^/        /'
+	echo "导入失败：未能生成 .godot/global_script_class_cache.cfg" >&2
+	exit 1
+fi
+echo "  OK"
 echo ""
 
 # ---------- 1. 静态门禁 ----------
@@ -122,10 +140,40 @@ echo "== 2/2 无头冒烟测试 =="
 smoke_exit=$?
 echo ""
 
-if [ "$smoke_exit" -eq 0 ]; then
-	echo "全部通过。"
-	exit 0
+if [ "$smoke_exit" -ne 0 ]; then
+	echo "冒烟测试失败（Godot 退出码 $smoke_exit）。" >&2
+	exit 1
 fi
 
-echo "冒烟测试失败（Godot 退出码 $smoke_exit）。" >&2
-exit 1
+# ---------- 3. 窗口运行冒烟（--windowed 才跑）----------
+# 无头模式下音频驱动是 Dummy，Sfx 在 play() 里直接返回，播放器根本不创建，
+# 「开播」这条路径完全不被执行。GDScript 对 native 方法/属性的调用是运行时检查：
+# 调用不存在的 native 方法（AudioStreamGenerator.get_playback）或属性
+# （AudioStreamPlayer.playback_mode）都能通过 --check-only，运行时才抛错，
+# 而 _ready() 一旦中断，播放器就永远不会开播——表现为「所有平台都没有音效」。
+# 这两次事故都是带窗口运行才暴露的，所以提供这一步作为音频路径的自动化兜底。
+# 需要显示器，CI 默认不跑。
+if [ "$WINDOWED" -eq 1 ]; then
+	echo "== 3/3 窗口运行冒烟（音频开播路径，需要显示器）=="
+	tmp="$(mktemp -t 2dbreakout_windowed.XXXXXX)"
+	"$GODOT" --path . --quit-after 300 >"$tmp" 2>&1
+	run_exit=$?
+	bad=""
+	for pat in "SCRIPT ERROR" "Failed to instantiate an autoload" "Failed to load script" \
+		"cannot be sampled" "Leaked instance" "ObjectDB instances leaked"; do
+		if grep -qF "$pat" "$tmp"; then bad="$bad $pat"; fi
+	done
+	if [ "$run_exit" -ne 0 ]; then bad="$bad Godot退出码$run_exit"; fi
+	rm -f "$tmp"
+	if [ -z "$bad" ]; then
+		echo "  OK    窗口运行 300 帧：无脚本错误、无 autoload 失败、无音频开播错误、无泄漏"
+	else
+		echo "  FAIL  窗口运行发现问题：$bad" >&2
+		"$GODOT" --path . --quit-after 300 2>&1 | grep -E "SCRIPT ERROR|at:|autoload|sample|Leaked|^ERROR" | head -12 | sed 's/^/        /' >&2
+		exit 1
+	fi
+	echo ""
+fi
+
+echo "全部通过。"
+exit 0

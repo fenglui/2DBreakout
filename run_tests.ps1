@@ -3,7 +3,9 @@
     一键验证：--check-only 静态门禁 + 无头冒烟测试。
 
 .DESCRIPTION
-    串起两步，任一步失败即以非零码退出，可直接用于本地提交前检查或 CI：
+    串起三步，任一步失败即以非零码退出，可直接用于本地提交前检查或 CI：
+      0) 跑一次 --headless --import，生成 class_name 的全局类缓存
+         （全新检出的仓库没有 .godot/，缺这一步时 --check-only 会因找不到 class_name 而失败）
       1) 对 scripts/ 与 tests/ 下每个 .gd 逐个跑 --check-only，出现 SCRIPT ERROR 即失败
          （GDScript warning 默认只提示不失败，加 -Strict 后同样视为失败）
       2) 跑 res://tests/headless_smoke_test.gd，其退出码即测试结果
@@ -16,6 +18,12 @@
 
 .PARAMETER Detailed
     打印 Godot 的完整输出（默认只显示摘要与失败详情）。
+
+.PARAMETER Windowed
+    追加第三步：带窗口运行 300 帧，检查音频开播路径。
+    无头模式下音频驱动是 Dummy，Sfx 直接不创建播放器，「播放器开播」这条路径只有
+    带窗口运行才会执行。GDScript 对 native 方法/属性的调用是运行时检查，--check-only
+    抓不到，所以这一步是音频路径唯一的自动化覆盖。需要显示器，CI 默认不跑。
 
 .EXAMPLE
     .\run_tests.ps1
@@ -35,7 +43,8 @@
 param(
 	[switch]$Strict,
 	[switch]$SkipSmoke,
-	[switch]$Detailed
+	[switch]$Detailed,
+	[switch]$Windowed
 )
 
 Set-StrictMode -Version Latest
@@ -103,6 +112,21 @@ if (-not $godot) {
 Write-Host "Godot:     $godot"
 Write-Host ""
 
+# ---------- 0. 资源导入 ----------
+# class_name 的全局类缓存（.godot/global_script_class_cache.cfg）由 Godot 的导入流程生成。
+# 全新检出的仓库没有 .godot/，此时 --check-only 会因为找不到跨脚本引用的 class_name 而报错，
+# 因此先跑一次导入（CI 与新克隆的本地环境都依赖这一步）。
+Write-Host "== 0/2 资源导入（生成 class_name 全局类缓存）==" -ForegroundColor Cyan
+$importOut = (@(cmd /c "`"$godot`" --headless --path `"$root`" --import 2>&1")) -join "`n"
+$cachePath = Join-Path $root '.godot\global_script_class_cache.cfg'
+if (-not (Test-Path -LiteralPath $cachePath)) {
+	Write-Host $importOut.Trim()
+	Write-Host "导入失败：未能生成 .godot/global_script_class_cache.cfg" -ForegroundColor Red
+	exit 1
+}
+Write-Host "  OK" -ForegroundColor Green
+Write-Host ""
+
 # ---------- 1. 静态门禁 ----------
 Write-Host "== 1/2 静态检查（--check-only）==" -ForegroundColor Cyan
 $targets = @()
@@ -159,10 +183,44 @@ Write-Host "== 2/2 无头冒烟测试 ==" -ForegroundColor Cyan
 $smokeExit = $LASTEXITCODE
 Write-Host ""
 
-if ($smokeExit -eq 0) {
-	Write-Host "全部通过。" -ForegroundColor Green
-	exit 0
+if ($smokeExit -ne 0) {
+	Write-Host "冒烟测试失败（Godot 退出码 $smokeExit）。" -ForegroundColor Red
+	exit 1
 }
 
-Write-Host "冒烟测试失败（Godot 退出码 $smokeExit）。" -ForegroundColor Red
-exit 1
+# ---------- 3. 窗口运行冒烟（-Windowed 才跑）----------
+# 无头模式（--headless）下音频驱动是 Dummy，Sfx 在 play() 里直接返回，播放器根本不创建，
+# 「开播」这条路径完全不被执行。GDScript 对 native 方法/属性的调用是运行时检查：
+# 调用不存在的 native 方法（AudioStreamGenerator.get_playback）或属性
+# （AudioStreamPlayer.playback_mode）都能通过 --check-only，运行时才抛错，
+# 而 _ready() 一旦中断，播放器就永远不会开播——表现为「所有平台都没有音效」。
+# 这两次事故都是带窗口运行才暴露的，所以提供这一步作为音频路径的自动化兜底。
+if ($Windowed) {
+	Write-Host "== 3/3 窗口运行冒烟（音频开播路径，需要显示器）==" -ForegroundColor Cyan
+	$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('2dbreakout_windowed_' + [Guid]::NewGuid().ToString('N') + '.log')
+	cmd /c "`"$godot`" --path `"$root`" --quit-after 300 > `"$tmp`" 2>&1" | Out-Null
+	$runExit = $LASTEXITCODE
+	$runOut = ''
+	if (Test-Path -LiteralPath $tmp) {
+		$runOut = [System.IO.File]::ReadAllText($tmp, [System.Text.Encoding]::UTF8)
+		Remove-Item -LiteralPath $tmp -Force
+	}
+	$bad = [System.Collections.Generic.List[string]]::new()
+	foreach ($pat in 'SCRIPT ERROR', 'Failed to instantiate an autoload', 'Failed to load script',
+		'cannot be sampled', 'Leaked instance', 'ObjectDB instances leaked') {
+		if ($runOut.Contains($pat)) { $bad.Add($pat) }
+	}
+	if ($runExit -ne 0) { $bad.Add("Godot 退出码 $runExit") }
+	if ($bad.Count -eq 0) {
+		Write-Host "  OK    窗口运行 300 帧：无脚本错误、无 autoload 失败、无音频开播错误、无泄漏" -ForegroundColor Green
+	} else {
+		Write-Host ("  FAIL  窗口运行发现问题：{0}" -f ($bad -join ' / ')) -ForegroundColor Red
+		($runOut -split "`n" | Where-Object { $_ -match 'SCRIPT ERROR|at:|autoload|sample|Leaked|^ERROR' }) |
+			Select-Object -First 12 | ForEach-Object { Write-Host ("        " + $_.TrimEnd()) }
+		exit 1
+	}
+	Write-Host ""
+}
+
+Write-Host "全部通过。" -ForegroundColor Green
+exit 0

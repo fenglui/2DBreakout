@@ -1,10 +1,12 @@
 extends SceneTree
 ## 开发辅助脚本（不属于游戏流程）：启动 Main.tscn，自动发射并操控挡板，
-## 依次截取“游戏进行中 / 已暂停 / 游戏结束 / 通关”四张画面保存到 screenshots/，便于人工确认视觉效果。
-## 运行方式：
+## 依次截取“游戏进行中 / 已暂停 / 游戏结束 / 关卡通过 / 第 2 关耐久砖 / 通关”画面
+## 保存到 screenshots/，便于人工确认视觉效果。
+## 必须带窗口运行（不要加 --headless），否则不渲染、截不到图：
 ##   godot --path . --script res://tests/capture_screenshot.gd
 
 const OUT_DIR := "res://screenshots"
+const PANEL_VBOX := "GameOverPanel/Panel/Margin/VBox"
 
 
 func _initialize() -> void:
@@ -27,15 +29,25 @@ func _run() -> void:
 	for i in 150:
 		paddle.position.x = clampf(ball.position.x, paddle.get("left_bound"), paddle.get("right_bound"))
 		await physics_frame
+
+	# 击破一块砖，趁碎屑还在空中截一张，确认粒子生效
+	# 震动在 0.2 秒内就衰减完，这里不读 offset，避免把「恰好衰减完」当成失败
+	var bricks: Node2D = scene.get_node("Bricks")
+	if bricks.get_child_count() > 0:
+		ball.brick_hit.emit(bricks.get_child(0))
+	var shake: Node = root.get_node("/root/Shake")
+	# 震动必须在击碎后立刻采样：trauma 每秒衰减 1.9，约 0.2 秒就归零了
+	print("[capture] 击碎瞬间 创伤值=", shake.call("get_trauma"),
+		" 相机偏移=", str(scene.get_node("Camera2D").offset))
+	await _wait(8)
 	await _shot("breakout.png")
 
 	# 暂停画面
 	_send(&"pause")
-	await physics_frame
-	await physics_frame
+	await _wait(2)
 	await _shot("paused.png")
 	_send(&"pause")
-	await physics_frame
+	await _wait(1)
 
 	# 连续掉球直到游戏结束
 	var guard := 0
@@ -43,35 +55,69 @@ func _run() -> void:
 		guard += 1
 		ball.set("attached_to_paddle", false)
 		ball.position = Vector2(paddle.position.x, float(ball.get("death_y")) + 50.0)
-		await physics_frame
-		await physics_frame
-	await physics_frame
+		await _wait(2)
+	await _wait(1)
 	await _shot("game_over.png")
 
-	# 重开一局，击破最后一块砖 -> 通关画面
+	# 重开一局，清空砖墙 -> 关卡通过面板
 	_send(&"launch")
 	await _wait(20)
-	var won: Node = current_scene
-	if won == null or won == scene:
-		print("[capture] 重开失败，跳过通关截图")
+	var level_clear: Node = current_scene
+	if level_clear == null or level_clear == scene:
+		print("[capture] 重开失败，跳过后续截图")
 		quit(0)
 		return
 
-	var bricks: Node2D = won.get_node("Bricks")
-	var won_ball: CharacterBody2D = won.get_node("Ball")
+	var clear_bricks: Node2D = level_clear.get_node("Bricks")
+	var clear_ball: CharacterBody2D = level_clear.get_node("Ball")
 	# queue_free 帧末才生效，先取快照再逐个移除；
-	# 通关判定依赖 Main 的击破计数，这里同步把计数推到“只剩两块”的位置。
-	var snapshot: Array = bricks.get_children()
-	won.set("_bricks_cleared", snapshot.size() - 2)
+	# 关卡判定依赖 Main 的击破计数，这里同步把计数推到“只剩两块”的位置。
+	var snapshot: Array = clear_bricks.get_children()
+	level_clear.set("_bricks_cleared", snapshot.size() - 2)
 	for i in snapshot.size() - 2:
 		snapshot[i].queue_free()
 	await _wait(3)
-	won_ball.brick_hit.emit(bricks.get_child(0))
-	won_ball.brick_hit.emit(bricks.get_child(1))
+	for node in clear_bricks.get_children():
+		node.set("hits_left", 1)
+	clear_ball.brick_hit.emit(clear_bricks.get_child(0))
+	clear_ball.brick_hit.emit(clear_bricks.get_child(1))
+	await _wait(3)
+	await _shot("level_clear.png")
+	print("[capture] 关卡通过标题=", level_clear.get_node(PANEL_VBOX + "/TitleLabel").text)
+
+	# 进入下一关：截一张带裂纹的多耐久砖块
+	_send(&"restart")
+	await _wait(6)
+	var level2: Node = current_scene
+	var level2_ball: CharacterBody2D = level2.get_node("Ball")
+	var level2_bricks: Node2D = level2.get_node("Bricks")
+	if level2_bricks.get_child_count() > 0:
+		level2_ball.brick_hit.emit(level2_bricks.get_child(0))
+		level2_ball.brick_hit.emit(level2_bricks.get_child(1))
+		level2_ball.brick_hit.emit(level2_bricks.get_child(1))
+	await _wait(6)
+	await _shot("level2.png")
+	print("[capture] 第 2 关=", level2.get_node("HUD/LevelLabel").text,
+		" 砖块耐久=", level2_bricks.get_child(0).get("max_hits"),
+		" 剩余耐久=", level2_bricks.get_child(0).get("hits_left"))
+
+	# 推到最后一关并清空 -> 通关画面
+	level2.set("_level", int(level2.get_script().get_script_constant_map().get("MAX_LEVEL", 1)))
+	var last_bricks: Node2D = level2.get_node("Bricks")
+	var last_snapshot: Array = last_bricks.get_children()
+	level2.set("_bricks_cleared", int(level2.get_script().get_script_constant_map().get("BRICK_TOTAL", 48)) - 2)
+	for i in last_snapshot.size() - 2:
+		last_snapshot[i].queue_free()
+	await _wait(3)
+	for node in last_bricks.get_children():
+		node.set("hits_left", 1)
+	level2_ball.brick_hit.emit(last_bricks.get_child(0))
+	level2_ball.brick_hit.emit(last_bricks.get_child(1))
 	await _wait(3)
 	await _shot("victory.png")
 
-	print("[capture] done. score=", won.get("_score"), " best=", won.get("_best"), " state=", won.get("_state"))
+	print("[capture] done. score=", level2.get("_score"), " best=", level2.get("_best"),
+		" state=", level2.get("_state"), " 标题=", level2.get_node(PANEL_VBOX + "/TitleLabel").text)
 	quit(0)
 
 
