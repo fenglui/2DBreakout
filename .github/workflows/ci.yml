@@ -1,0 +1,102 @@
+name: CI
+
+# 说明：
+# - 使用标准版（非 .NET）Godot 镜像。Godot 的 .NET/Mono 版不支持 Web 导出，
+#   本项目是纯 GDScript，标准版即可覆盖全部四个预设。
+# - validate 是硬门禁：任一脚本静态检查失败、或冒烟测试任一项失败，流水线即失败。
+# - export 依赖 validate 通过，产物以 artifact 形式上传，不写入仓库。
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GODOT_VERSION: 4.7.2
+  GODOT_IMAGE: barichello/godot-ci:4.7.2-stable
+
+jobs:
+  validate:
+    name: 静态检查 + 无头冒烟测试
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ env.GODOT_IMAGE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 导入资源
+        run: godot --headless --import --path .
+
+      - name: 一键验证（--check-only 静态门禁 + 无头冒烟测试）
+        run: |
+          chmod +x run_tests.sh
+          ./run_tests.sh --strict
+
+  export:
+    name: 导出 ${{ matrix.label }}
+    needs: validate
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ env.GODOT_IMAGE }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: Windows Desktop
+            label: Windows
+            outdir: build/windows
+            outpath: build/windows/2DBreakout.exe
+            artifact: 2DBreakout-windows-x86_64
+          - preset: Linux
+            label: Linux
+            outdir: build/linux
+            outpath: build/linux/2DBreakout.x86_64
+            artifact: 2DBreakout-linux-x86_64
+          - preset: macOS
+            label: macOS
+            outdir: build/macos
+            outpath: build/macos/2DBreakout.zip
+            artifact: 2DBreakout-macos-universal
+          - preset: Web
+            label: Web
+            outdir: build/web
+            outpath: build/web/index.html
+            artifact: 2DBreakout-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 导入资源
+        run: godot --headless --import --path .
+
+      - name: 导出（目标目录必须预先存在）
+        run: |
+          mkdir -p ${{ matrix.outdir }}
+          godot --headless --path . --export-release "${{ matrix.preset }}" ${{ matrix.outpath }}
+
+      - name: 校验产物非空
+        run: |
+          shopt -s nullglob
+          files=(${{ matrix.outdir }}/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::${{ matrix.preset }} 未产出任何文件"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::$f 为空"
+              exit 1
+            fi
+            echo "$(basename "$f") $(stat -c%s "$f") bytes"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.outdir }}
+          if-no-files-found: error
+          retention-days: 14

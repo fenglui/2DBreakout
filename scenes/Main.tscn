@@ -1,0 +1,209 @@
+[gd_scene load_steps=13 format=3]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" path="res://scripts/paddle.gd" id="2_paddle"]
+[ext_resource type="Script" path="res://scripts/ball.gd" id="3_ball"]
+[ext_resource type="Script" path="res://scripts/hud.gd" id="4_hud"]
+[ext_resource type="Script" path="res://scripts/game_over_panel.gd" id="5_gameover"]
+[ext_resource type="Script" path="res://scripts/pause_panel.gd" id="6_pause"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_wall_vertical"]
+size = Vector2(14, 780)
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_wall_top"]
+size = Vector2(500, 14)
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_paddle"]
+size = Vector2(108, 20)
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_sensor"]
+size = Vector2(92, 30)
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_ball"]
+radius = 9.0
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_main")
+
+[node name="Background" type="ColorRect" parent="."]
+z_index = -10
+offset_right = 480.0
+offset_bottom = 720.0
+mouse_filter = 2
+color = Color(0.043137, 0.054902, 0.086275, 1)
+
+[node name="Walls" type="Node2D" parent="."]
+
+[node name="LeftWall" type="StaticBody2D" parent="Walls"]
+position = Vector2(-7, 360)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Walls/LeftWall"]
+shape = SubResource("RectangleShape2D_wall_vertical")
+
+[node name="RightWall" type="StaticBody2D" parent="Walls"]
+position = Vector2(487, 360)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Walls/RightWall"]
+shape = SubResource("RectangleShape2D_wall_vertical")
+
+[node name="TopWall" type="StaticBody2D" parent="Walls"]
+position = Vector2(240, -7)
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Walls/TopWall"]
+shape = SubResource("RectangleShape2D_wall_top")
+
+[node name="Bricks" type="Node2D" parent="."]
+
+[node name="Paddle" type="CharacterBody2D" parent="."]
+position = Vector2(240, 640)
+collision_layer = 2
+collision_mask = 0
+script = ExtResource("2_paddle")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Paddle"]
+shape = SubResource("RectangleShape2D_paddle")
+
+[node name="Sensor" type="Area2D" parent="Paddle"]
+position = Vector2(0, -8)
+collision_layer = 0
+collision_mask = 8
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Paddle/Sensor"]
+shape = SubResource("RectangleShape2D_sensor")
+
+[node name="Ball" type="CharacterBody2D" parent="."]
+position = Vector2(240, 617)
+collision_layer = 8
+collision_mask = 7
+script = ExtResource("3_ball")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Ball"]
+shape = SubResource("CircleShape2D_ball")
+
+[node name="HUD" type="CanvasLayer" parent="."]
+script = ExtResource("4_hud")
+
+[node name="ScoreLabel" type="Label" parent="HUD"]
+offset_left = 16.0
+offset_top = 10.0
+offset_right = 240.0
+offset_bottom = 38.0
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.921569, 0.941176, 1, 1)
+theme_override_font_sizes/font_size = 20
+text = "分数 0"
+vertical_alignment = 1
+
+[node name="LivesLabel" type="Label" parent="HUD"]
+offset_left = 280.0
+offset_top = 10.0
+offset_right = 464.0
+offset_bottom = 38.0
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.921569, 0.941176, 1, 1)
+theme_override_font_sizes/font_size = 20
+text = "生命 3"
+horizontal_alignment = 2
+vertical_alignment = 1
+
+[node name="BestLabel" type="Label" parent="HUD"]
+offset_left = 16.0
+offset_top = 40.0
+offset_right = 240.0
+offset_bottom = 64.0
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 16
+text = "最高分 0"
+vertical_alignment = 1
+
+[node name="HintLabel" type="Label" parent="HUD"]
+offset_top = 666.0
+offset_right = 480.0
+offset_bottom = 694.0
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 16
+text = "按 空格 发射球"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="GameOverPanel" type="CanvasLayer" parent="."]
+script = ExtResource("5_gameover")
+
+[node name="Panel" type="PanelContainer" parent="GameOverPanel"]
+visible = false
+offset_left = 60.0
+offset_top = 200.0
+offset_right = 420.0
+offset_bottom = 500.0
+
+[node name="Margin" type="MarginContainer" parent="GameOverPanel/Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 24
+theme_override_constants/margin_top = 20
+theme_override_constants/margin_right = 24
+theme_override_constants/margin_bottom = 20
+
+[node name="VBox" type="VBoxContainer" parent="GameOverPanel/Panel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 16
+
+[node name="TitleLabel" type="Label" parent="GameOverPanel/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "游戏结束"
+horizontal_alignment = 1
+
+[node name="FinalScoreLabel" type="Label" parent="GameOverPanel/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.976471, 0.780392, 0.298039, 1)
+theme_override_font_sizes/font_size = 22
+text = "最终分数 0"
+horizontal_alignment = 1
+
+[node name="BestScoreLabel" type="Label" parent="GameOverPanel/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "最高分 0"
+horizontal_alignment = 1
+
+[node name="RestartButton" type="Button" parent="GameOverPanel/Panel/Margin/VBox"]
+layout_mode = 2
+text = "再来一局"
+
+[node name="TipLabel" type="Label" parent="GameOverPanel/Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 14
+text = "按 空格 / R 重开"
+horizontal_alignment = 1
+
+[node name="PausePanel" type="CanvasLayer" parent="."]
+script = ExtResource("6_pause")
+
+[node name="Panel" type="PanelContainer" parent="PausePanel"]
+visible = false
+offset_left = 150.0
+offset_top = 290.0
+offset_right = 330.0
+offset_bottom = 410.0
+
+[node name="Margin" type="MarginContainer" parent="PausePanel/Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 20
+theme_override_constants/margin_top = 24
+theme_override_constants/margin_right = 20
+theme_override_constants/margin_bottom = 24
+
+[node name="PausedLabel" type="Label" parent="PausePanel/Panel/Margin"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 30
+text = "已暂停"
+horizontal_alignment = 1

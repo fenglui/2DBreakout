@@ -1,0 +1,54 @@
+name: Deploy Web to GitHub Pages
+
+# 仅手动触发（workflow_dispatch），不参与常规 CI，避免未启用 Pages 的仓库出现红色失败。
+# 前置条件：仓库 Settings -> Pages 启用（Build and deployment 选 "GitHub Actions"）。
+# Web 预设关闭了线程支持，产物不依赖 COOP/COEP 响应头，Pages 可直接运行。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 导出 Web 版
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.7.2-stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 导入资源
+        run: godot --headless --import --path .
+
+      - name: 导出 Web
+        run: |
+          mkdir -p build/web
+          godot --headless --path . --export-release "Web" build/web/index.html
+
+      - name: 校验产物
+        run: |
+          test -s build/web/index.html
+          ls -la build/web
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+  deploy:
+    name: 发布到 Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.page.outputs.page_url }}
+    steps:
+      - id: page
+        uses: actions/deploy-pages@v4

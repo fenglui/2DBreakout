@@ -1,17 +1,17 @@
-# MCPBreakout
+# 2DBreakout
 
 一个通过 Godot MCP 自动创建的 2D 打砖块（Breakout）小游戏，使用 Godot 4.7.2 + GDScript 开发，无外部资源、无 C#、无第三方插件。
 
 ## 快速开始
 
-1. 用 Godot 打开项目目录 `E:\root\game\game-dev\2DBreakout`
+1. 用 Godot 打开项目目录 `2DBreakout`
 2. 双击 `scenes/Main.tscn` 或直接运行（F5）
 3. 玩法：左右方向键 / A/D 移动挡板；空格发射球；P 键暂停/继续；击破全部砖块通关，空格/R 重开
 
 ## 项目结构
 
 ```
-MCPBreakout
+2DBreakout
 ├── project.godot          # 项目配置 + 输入映射（move_left/move_right/launch/pause/restart）
 ├── .gitignore             # 忽略 .godot/ 缓存、build/ 导出产物
 ├── export_presets.cfg     # 导出预设：Windows / Linux / macOS / Web
@@ -31,7 +31,7 @@ MCPBreakout
 │   ├── hud.gd                 # HUD：分数、生命、最高分、操作提示
 │   ├── game_over_panel.gd     # 结算面板：游戏结束 / 通关标题 + 最终分数/最高分/重开按钮
 │   ├── pause_panel.gd         # 暂停面板：“已暂停”
-│   └── high_score.gd           # 最高分存档（ConfigFile，保存至 user://mcp_breakout_save.cfg）
+│   └── high_score.gd           # 最高分存档（ConfigFile，保存至 user://2d_breakout_save.cfg）
 ├── tests/
 │   ├── headless_smoke_test.gd      # 无头冒烟测试（60 项检查，覆盖核心玩法，可重复运行）
 │   └── capture_screenshot.gd       # 截图辅助脚本（生成运行/暂停/结束/通关四张预览图）
@@ -56,7 +56,7 @@ MCPBreakout
 
 - 物理：球使用 `CharacterBody2D` + 手动 bounce 处理碰撞，配合最小水平速度保障避免长时间近乎垂直的卡住问题。
 - 碰撞层：严格对应 `project.godot` 的 `layer_names` —— Wall=1、Paddle=2、Brick=4、Ball=8。球掩码为 `1|2|4`，挡板传感器掩码只指向 Ball 层，砖块掩码为 0（碰撞全部由球发起）。
-- 存档：`HighScore.load_best()` / `save_best()` 基于 `ConfigFile`，路径为 `user://mcp_breakout_save.cfg`，重启游戏后仍保留最高分。
+- 存档：`HighScore.load_best()` / `save_best()` 基于 `ConfigFile`，路径为 `user://2d_breakout_save.cfg`，重启游戏后仍保留最高分。
 - 状态：`Main` 的 `State` 枚举为 `PLAYING / PAUSED / GAME_OVER / WON`。主控设为 `PROCESS_MODE_ALWAYS` 以便处理暂停输入，`Ball` 与 `Paddle` 设为 `PAUSABLE` 使暂停时真正静止。
 - 结算：击破最后一块砖 → `WON`（通关），生命归零 → `GAME_OVER`，两者共用 `_settle(victory)` 与同一个结算面板，仅标题与提示文案不同。
 - 运行时生成：砖墙在 `_ready()` 时按 6 行 × 8 列动态生成，不依赖外部纹理。
@@ -113,18 +113,18 @@ Godot 可执行文件查找顺序：环境变量 `GODOT_PATH` → `PATH` 中的 
 
 | 预设 | 平台标识 | 产物 |
 |---|---|---|
-| `Windows Desktop` | `Windows Desktop` | `build/windows/MCPBreakout.exe`（x86_64） |
-| `Linux` | `Linux/X11` | `build/linux/MCPBreakout.x86_64` |
-| `macOS` | `macOS` | `build/macos/MCPBreakout.zip`（universal，arm64 + x86_64） |
+| `Windows Desktop` | `Windows Desktop` | `build/windows/2DBreakout.exe`（x86_64） |
+| `Linux` | `Linux/X11` | `build/linux/2DBreakout.x86_64` |
+| `macOS` | `macOS` | `build/macos/2DBreakout.zip`（universal，arm64 + x86_64） |
 | `Web` | `Web` | `build/web/`（单线程构建，无需 COOP/COEP 响应头） |
 
 本地导出（需先在 编辑器 → 导出 → 导出资源 安装 **4.7.2 标准版**导出模板，且目标目录必须预先存在）：
 
 ```
 mkdir -p build/windows   # Windows 下用 New-Item -ItemType Directory build\windows
-godot --headless --path . --export-release "Windows Desktop" build/windows/MCPBreakout.exe
-godot --headless --path . --export-release "Linux"           build/linux/MCPBreakout.x86_64
-godot --headless --path . --export-release "macOS"           build/macos/MCPBreakout.zip
+godot --headless --path . --export-release "Windows Desktop" build/windows/2DBreakout.exe
+godot --headless --path . --export-release "Linux"           build/linux/2DBreakout.x86_64
+godot --headless --path . --export-release "macOS"           build/macos/2DBreakout.zip
 godot --headless --path . --export-release "Web"             build/web/index.html
 ```
 

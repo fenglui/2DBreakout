@@ -1,0 +1,21 @@
+# Godot 4 缓存与导入产物（由引擎生成，不入库）
+.godot/
+
+# 导出产物
+build/
+*.pck
+*.zip
+*.exe
+*.x86_64
+*.pck.exe
+export_presets.cfg.user.json
+
+# 本地最高分存档位于 user://，不在仓库内；此处兜底忽略同名文件
+2d_breakout_save.cfg
+
+# 系统 / 编辑器杂项
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.tmp.*
