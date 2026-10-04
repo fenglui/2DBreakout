@@ -1,7 +1,7 @@
 extends SceneTree
 ## 开发辅助脚本（不属于游戏流程）：启动 Main.tscn，自动发射并操控挡板，
-## 依次截取“蓄力瞄准 / 游戏进行中 / 已暂停 / 游戏结束 / 关卡通过 / 第 2 关耐久砖 / 通关”画面
-## 保存到 screenshots/，便于人工确认视觉效果。
+## 依次截取“蓄力瞄准 / 游戏进行中 / 特殊砖与多球 / 已暂停 / 游戏结束 / 关卡通过 /
+## 第 2 关耐久砖 / 通关”画面保存到 screenshots/，便于人工确认视觉效果。
 ## 必须带窗口运行（不要加 --headless），否则不渲染、截不到图：
 ##   godot --path . --script res://tests/capture_screenshot.gd
 
@@ -26,7 +26,8 @@ func _run() -> void:
 	await physics_frame
 
 	var paddle: CharacterBody2D = scene.get_node("Paddle")
-	var ball: CharacterBody2D = scene.get_node("Ball")
+	var balls: BallManager = scene.get_node("Balls")
+	var ball: Ball = balls.primary()
 	DirAccess.make_dir_recursive_absolute(OUT_DIR)
 
 	# 蓄力瞄准：按住 ← 让预测线斜着画出来，同时挡板蓄力条可见
@@ -57,6 +58,11 @@ func _run() -> void:
 	await _wait(8)
 	await _shot("breakout.png")
 
+	# 特殊砖与多球：这张图是六种特殊砖与「球 ×N」的唯一视觉存档。
+	# 手动测试要能一眼核对形状标记（护角 / 十字 / 菱形 / 炸弹 / 双点 / 双层倒 V）
+	# 与 HUD 上的球数，所以这里刻意让 5 颗球同时在场、球速冻结。
+	await _capture_specials(scene, paddle, balls, ball)
+
 	# 暂停画面
 	_send(&"pause")
 	await _wait(2)
@@ -84,7 +90,7 @@ func _run() -> void:
 		return
 
 	var clear_bricks: Node2D = level_clear.get_node("Bricks")
-	var clear_ball: CharacterBody2D = level_clear.get_node("Ball")
+	var clear_ball: Ball = (level_clear.get_node("Balls") as BallManager).primary()
 	# queue_free 帧末才生效，先取快照再逐个移除；
 	# 关卡判定依赖 Main 的击破计数，这里同步把计数推到“只剩两块”的位置。
 	var snapshot: Array = clear_bricks.get_children()
@@ -104,7 +110,7 @@ func _run() -> void:
 	_send(&"restart")
 	await _wait(6)
 	var level2: Node = current_scene
-	var level2_ball: CharacterBody2D = level2.get_node("Ball")
+	var level2_ball: Ball = (level2.get_node("Balls") as BallManager).primary()
 	var level2_bricks: Node2D = level2.get_node("Bricks")
 	if level2_bricks.get_child_count() > 0:
 		level2_ball.brick_hit.emit(level2_bricks.get_child(0))
@@ -134,6 +140,40 @@ func _run() -> void:
 	print("[capture] done. score=", level2.get("_score"), " best=", level2.get("_best"),
 		" state=", level2.get("_state"), " 标题=", level2.get_node(PANEL_VBOX + "/TitleLabel").text)
 	quit(0)
+
+
+## 「特殊砖与多球」截图。
+##
+## 这张图存在的理由是六种特殊砖的形状标记与 HUD 的「球 ×N」目前没有别的视觉存档，
+## 而它们恰好是最容易在换肤或改分辨率时被悄悄改坏的两样东西。
+## 球刻意冻结在画面里而不是任其飞：飞行中的球会拖出一条随机的轨迹，
+## 每次重截的图都不一样，就没法拿两张图对比确认「形状标记没变」。
+func _capture_specials(scene: Node, paddle: CharacterBody2D, balls: BallManager, ball: Ball) -> void:
+	# 主球拉回挡板上方，让画面下半部分留给副球
+	ball.set("attached_to_paddle", false)
+	ball.global_position = Vector2(240.0, 430.0)
+	for i in 4:
+		balls.spawn_extra(Vector2(120.0 + i * 80.0, 500.0 + (i % 2) * 46.0),
+			Vector2(0.0, -1.0))
+	for b in balls.all_balls():
+		b.set_physics_process(false)
+	# 减速状态也留在图里：霜圈是「球怎么慢了」唯一的常驻提示
+	balls.apply_speed_scale(0.62)
+	# HUD 球数由 count_changed 驱动，spawn_extra 已经发过信号，这里再确认一次
+	(scene.get_node("HUD") as GameHUD).set_balls(balls.count())
+	await _wait(3)
+	await _shot("specials.png")
+	print("[capture] 特殊砖图：场上 ", balls.count(), " 颗球，图例=",
+		String(scene.call("_level_legend")), " 球数标签=",
+		scene.get_node("HUD/BallsLabel").text)
+	# 恢复成单球满速，后面的截图不能带着减速与 5 颗球继续跑
+	for b in balls.all_balls():
+		if b != ball:
+			b.emit_signal("fell_out_of_playfield")
+	await _wait(2)
+	balls.apply_speed_scale(1.0)
+	ball.set("attached_to_paddle", true)
+	ball.call("stick_to", paddle)
 
 
 func _wait(frames: int) -> void:

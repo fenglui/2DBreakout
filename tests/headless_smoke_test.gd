@@ -4,17 +4,28 @@ extends SceneTree
 ##   godot --headless --path . --script res://tests/headless_smoke_test.gd
 ## 它会真实实例化 Main.tscn，模拟输入并校验：
 ## 移动/发射/碰撞/计分/掉命/暂停/关卡递进/通关/重开/最高分/多耐久砖块/挡板收窄/
-## 退出按钮/音效与粒子与震动。
+## 退出按钮/音效与粒子与震动，以及 P0 手感三件套与 P1 的 6 种特殊砖 + 多球。
 ## 用例开头会清掉 user:// 存档，因此可以任意次连续运行（幂等）。
 ##
 ## 测试不写死任何来自游戏脚本的数值：State 枚举、砖块总数、每块砖分数、生命数、
-## 关卡数、砖块耐久、挡板宽度阶梯、碰撞层位值，全部从 main.gd 的脚本常量与
-## project.godot 的 layer_names 反查得到，游戏侧改名或调数不会让测试静默失效。
+## 关卡数、砖块耐久、挡板宽度阶梯、碰撞层位值、Brick.Kind 枚举、
+## 特殊砖倍率表、同屏球数上限，全部从脚本常量与 project.godot 的 layer_names
+## 反查得到，游戏侧改名或调数不会让测试静默失效。
+##
+## 用例分成两批，这个划分是必要的，不是随手切的：
+## - 第 1~21 节测核心流程，跑在一面【全普通砖】的墙上（见 _degrade_special_bricks）。
+##   爆破砖会连带清掉周围砖块、分裂砖会给场上加球，两者都会改动「砖数」「球数」
+##   这些被时序断言盯着的量——前一节让球自由飞 400 帧，墙就可能在断言取样前
+##   被连锁清空，或者多出来的球先掉光把生命扣掉。降级之后这些用例的时序假设
+##   与 P1 之前完全一致，断言的强度没有被稀释。
+## - 第 22 节用一个专用场景把六种特殊砖与 BallManager 的每条规则逐个打开验证。
 
 const MAIN_SCENE := "res://scenes/Main.tscn"
 const MAIN_SCRIPT := "res://scripts/main.gd"
 const SFX_SCRIPT := "res://scripts/sfx.gd"
 const BALL_SCRIPT := "res://scripts/ball.gd"
+const BRICK_SCRIPT := "res://scripts/brick.gd"
+const BALL_MANAGER_SCRIPT := "res://scripts/ball_manager.gd"
 const SAVE_PATH := "user://2d_breakout_save.cfg"
 const PANEL_VBOX := "GameOverPanel/Panel/Margin/VBox"
 const PAUSE_VBOX := "PausePanel/Panel/Margin/VBox"
@@ -46,9 +57,22 @@ var _max_charge_tilt := 0.0
 var _aim_bounces := 0
 var _combo_highlight := 0
 var _combo_glow_at := 0
+## —— P1 特殊砖与多球 ——
+var _brick_layout: Array = []
+var _kind_mult: Array = []
+var _kinds: Dictionary = {}
+var _kind_names: Array = []
+var _blast_radius := 0.0
+var _armor_extra_hits := 0
+var _slow_scale := 0.0
+var _slow_seconds := 0.0
+var _split_spread_deg := 0.0
+var _max_lives := 0
+var _max_balls := 0
 var _main_script: GDScript = null
 var _sfx_script: GDScript = null
 var _ball_script: GDScript = null
+var _brick_script: GDScript = null
 
 var _checks := 0
 var _fails := 0
@@ -100,6 +124,85 @@ func _bind_constants() -> void:
 	_main_script = script
 	_sfx_script = load(SFX_SCRIPT) as GDScript
 	_ball_script = load(BALL_SCRIPT) as GDScript
+	_brick_script = load(BRICK_SCRIPT) as GDScript
+
+	# —— P1：布局表、倍率表、爆破/减速/分裂参数全部从脚本常量反查 ——
+	_brick_layout = consts.get("BRICK_LAYOUT", [])
+	_kind_mult = consts.get("KIND_POINTS_MULT", [])
+	_blast_radius = float(consts.get("BLAST_RADIUS", 0.0))
+	_armor_extra_hits = int(consts.get("ARMOR_EXTRA_HITS", 0))
+	_slow_scale = float(consts.get("SLOW_SPEED_SCALE", 0.0))
+	_slow_seconds = float(consts.get("SLOW_SECONDS", 0.0))
+	_split_spread_deg = float(consts.get("SPLIT_SPREAD_DEG", 0.0))
+	_max_lives = int(consts.get("MAX_LIVES", 0))
+	if _brick_script != null:
+		var bconsts: Dictionary = _brick_script.get_script_constant_map()
+		_kinds = bconsts.get("Kind", {})
+		_kind_names = bconsts.get("KIND_NAMES", [])
+	if _ball_manager_script() != null:
+		_max_balls = int(_ball_manager_script().get_script_constant_map().get("MAX_BALLS", 0))
+
+
+## ball_manager.gd 的脚本对象。第 22 节要读 MAX_BALLS，
+## 放在函数里而不是缓存成字段：同屏球数上限归 BallManager 所有，
+## Main 里没有第二份副本，不缓存是为了逼测试每次都从真实来源取。
+func _ball_manager_script() -> GDScript:
+	return load(BALL_MANAGER_SCRIPT) as GDScript
+
+
+## 主球。球不再挂在 Main 下而是归 Balls(BallManager) 所有，
+## 所以测试不能自己拼节点路径——路径是实现细节，primary() 才是契约。
+func _balls(scene: Node) -> BallManager:
+	return scene.get_node("Balls") as BallManager
+
+
+## 取某个 kind 的枚举值。测试里不写字面数字：Brick.Kind 一旦重排，
+## 写死的 4 就指向另一种砖，断言会「通过」但验的根本不是爆破砖。
+func _kind(name: String) -> int:
+	return int(_kinds.get(name, -1))
+
+
+## 某关的标准砖块耐久（第 2 节的降级与第 14 节的期望值共用同一份口径）。
+func _base_hits_for_level(level: int) -> int:
+	if _level_hits.is_empty():
+		return 1
+	return int(_level_hits[(level - 1) % _level_hits.size()])
+
+
+## 把场上所有特殊砖临时降级成普通砖（分数与耐久一并还原），返回改动块数。
+##
+## 理由见文件头：爆破砖会连带清掉周围砖块、分裂砖会给场上加球，
+## 两者都会改动「砖数」「球数」这两个被时序断言盯着的量。
+## 降级必须把 points / max_hits 一起还原成普通砖的值，否则加固砖多出来的
+## 2 点耐久会让「分数 == 砖数 × 每块砖分值」这类算术断言在旧用例里失准。
+func _degrade_special_bricks(bricks_root: Node2D, base_hits: int) -> int:
+	var changed := 0
+	for child in bricks_root.get_children():
+		var brick := child as Brick
+		if brick == null or not brick.is_special():
+			continue
+		brick.kind = Brick.Kind.NORMAL
+		brick.points = _points_per_brick
+		brick.max_hits = base_hits
+		brick.hits_left = base_hits
+		changed += 1
+	return changed
+
+
+## 清掉场上除主球以外的所有副球，返回清掉的数量。
+## 用球自己的 fell_out_of_playfield 信号来回收，而不是 queue_free()：
+## BallManager 只在该信号里维护 _extras，直接 free 会让它的计数与现实脱节，
+## 后面所有关于球数的断言都会读到脏值。
+func _drop_extra_balls(scene: Node) -> int:
+	var balls := _balls(scene)
+	var dropped := 0
+	for extra in balls.all_balls():
+		if extra == balls.primary():
+			continue
+		extra.emit_signal("fell_out_of_playfield")
+		dropped += 1
+	await _wait(2)
+	return dropped
 
 
 ## 连击奖励公式直接问 main.gd 要，测试里不维护副本。
@@ -108,6 +211,13 @@ func _combo_bonus_for(combo: int) -> int:
 	if _main_script == null or not _main_script.has_method("combo_bonus_for"):
 		return 0
 	return int(_main_script.call("combo_bonus_for", combo))
+
+
+## main.gd 上的脚本常量。同一个来源取同一个值，避免各处再抄一遍名字。
+func _main_const(name: String, fallback: Variant = null) -> Variant:
+	if _main_script == null:
+		return fallback
+	return _main_script.get_script_constant_map().get(name, fallback)
 
 
 ## 依据 project.godot 的 layer_names 反查位值（第 N 层 -> 1 << (N-1)）。
@@ -251,7 +361,8 @@ func _run() -> void:
 	await physics_frame
 
 	var paddle: CharacterBody2D = scene.get_node("Paddle")
-	var ball: CharacterBody2D = scene.get_node("Ball")
+	var balls: BallManager = _balls(scene)
+	var ball: Ball = balls.primary()
 	var bricks: Node2D = scene.get_node("Bricks")
 	var pause_label: Label = scene.get_node(PAUSE_VBOX + "/PausedLabel")
 
@@ -267,6 +378,11 @@ func _run() -> void:
 	_check(pause_label.text == "已暂停", "暂停面板文本为“已暂停”")
 	_check(scene.get_node("HUD/LevelLabel").text.contains("1"),
 		"HUD 显示关卡（%s）" % scene.get_node("HUD/LevelLabel").text)
+	# P1 之后的墙含有特殊砖，这里就地降级成全普通砖墙——理由见文件头，
+	# 六种特殊砖的真实行为由第 22 节单独验证。放在第 1 节断言之后，
+	# 是为了让「砖块总数 / 初始状态」这几条仍然断言真正的初始布局。
+	_check(_degrade_special_bricks(bricks, _base_hits_for_level(1)) > 0,
+		"第 1~21 节把特殊砖降级为普通砖（含分数与耐久还原）")
 
 	# ---------- 2. 手感系统就位 ----------
 	var sfx_node: Node = root.get_node_or_null("/root/Sfx")
@@ -329,14 +445,21 @@ func _run() -> void:
 		"球始终被限制在左右/顶部墙体之内（x=%.1f, y=%.1f）" % [ball.position.x, ball.position.y])
 
 	# ---------- 7. 击破砖块会生成碎屑粒子，且会自行销毁 ----------
-	var ball2: CharacterBody2D = ball
+	var ball2: Ball = ball
 	var fx_before: int = fx_root.get_child_count()
 	ball2.brick_hit.emit(bricks.get_child(0))
 	await _wait(2)
 	var fx_after: int = fx_root.get_child_count()
 	_check(fx_after > fx_before, "击破砖块时在 Fx 下生成碎屑粒子（%d -> %d）" % [fx_before, fx_after])
 	var burst: Node = fx_root.get_child(fx_root.get_child_count() - 1)
-	_check(burst is CPUParticles2D and bool(burst.get("one_shot")), "碎屑是一次性(one_shot) CPUParticles2D")
+	# 只断言「本次生成的是一次性粒子」而不是「Fx 的最后一个子节点就是它」：
+	# P1 之后爆破砖还会在 Fx 里同时挂冲击波节点，节点顺序不该被这条用例锁死。
+	var has_burst := false
+	for fx_child in fx_root.get_children():
+		if fx_child is CPUParticles2D and bool(fx_child.get("one_shot")):
+			has_burst = true
+			break
+	_check(has_burst, "碎屑是一次性(one_shot) CPUParticles2D")
 	await _wait(240)
 	_check(fx_root.get_child_count() == 0,
 		"碎屑粒子播放完毕后自动销毁，不累积泄漏（剩余 %d 个）" % fx_root.get_child_count())
@@ -455,8 +578,10 @@ func _run() -> void:
 		"重开后挡板恢复初始宽度（%.1f）" % _gf(restarted.get_node("Paddle"), "paddle_width"))
 
 	# ---------- 13. 关卡递进：清空砖墙先进入“关卡通过”，不是直接结束 ----------
+	# 重开是整场景重载，墙是重新生成的，得再降级一次（文件头说明了为什么）
+	_degrade_special_bricks(restarted.get_node("Bricks") as Node2D, _base_hits_for_level(1))
 	var bricks3: Node2D = restarted.get_node("Bricks")
-	var ball3: CharacterBody2D = restarted.get_node("Ball")
+	var ball3: Ball = _balls(restarted).primary()
 	var score_before_clear: int = _gi(restarted, "_score")
 	var lives_before_clear: int = _gi(restarted, "_lives")
 	# queue_free 帧末才生效：先取快照，释放除最后一块以外的全部砖，再真实击破最后一块
@@ -489,6 +614,8 @@ func _run() -> void:
 	_check(_gi(restarted, "_bricks_cleared") == 0, "新一关的击破计数归零")
 	_check(restarted.get_node("Bricks").get_child_count() == _brick_total,
 		"新一关砖墙重建（%d 块）" % restarted.get_node("Bricks").get_child_count())
+	# 进入第 2 关同样要重降级，否则第 14/15 节会在含爆破砖的墙上取样
+	_degrade_special_bricks(restarted.get_node("Bricks") as Node2D, _base_hits_for_level(2))
 	_check(not restarted.get_node("GameOverPanel/Panel").visible, "进入下一关后结算面板收起")
 	_check(restarted.get_node("HUD/LevelLabel").text.contains("2"),
 		"HUD 关卡显示同步（%s）" % restarted.get_node("HUD/LevelLabel").text)
@@ -505,7 +632,7 @@ func _run() -> void:
 
 	# ---------- 14. 多耐久砖块：第 2 关的砖要打两次才碎 ----------
 	var tough: Node = restarted.get_node("Bricks").get_child(0)
-	var hits_expected: int = int(_level_hits[1 % _level_hits.size()])
+	var hits_expected: int = _base_hits_for_level(2)
 	_check(int(tough.get("max_hits")) == hits_expected,
 		"第 2 关砖块耐久为 %d（实际 %d）" % [hits_expected, int(tough.get("max_hits"))])
 	var score_before_tough: int = _gi(restarted, "_score")
@@ -581,7 +708,7 @@ func _run() -> void:
 		"结算面板标题切换为“通关！”")
 	_check(restarted.get_node("HUD/HintLabel").text.contains("通关"),
 		"通关后 HUD 底部提示同步更新（%s）" % restarted.get_node("HUD/HintLabel").text)
-	_check(not bool(restarted.get_node("Ball").get("visible")), "通关后球停止运动并隐藏")
+	_check(not bool(_balls(restarted).primary().get("visible")), "通关后球停止运动并隐藏")
 
 	# 结算状态下不应再扣命：直接触发掉球信号，生命必须保持不变
 	var lives_at_win: int = _gi(restarted, "_lives")
@@ -665,7 +792,9 @@ func _run() -> void:
 	# 速度被归一化成 (430, 0) 却一帧不动）。
 	# 放在最后、用通关重开后的干净实例跑，避免这段长时间飞行影响前面各节的断言基线。
 	if restarted2 != null:
-		var env_ball: CharacterBody2D = restarted2.get_node("Ball") as CharacterBody2D
+		_degrade_special_bricks(restarted2.get_node("Bricks") as Node2D,
+			_base_hits_for_level(_gi(restarted2, "_level")))
+		var env_ball: Ball = _balls(restarted2).primary()
 		var env_paddle: CharacterBody2D = restarted2.get_node("Paddle") as CharacterBody2D
 		var env_consts: Dictionary = (env_ball.get_script() as GDScript).get_script_constant_map()
 		var min_ang: float = float(env_consts.get("MIN_ANGLE_FROM_HORIZONTAL", 0.0))
@@ -733,20 +862,460 @@ func _run() -> void:
 	await _finish_p0_suite(p0_scene)
 
 
+## —— 第 22 节：P1 六种特殊砖 + 多球 ——
+## 单独 new 一个场景，不复用前面任何实例：这一节要主动破坏砖墙与球数，
+## 复用会直接踩到第 15 节「最后两块砖判通关」与第 20 节「球速角度包络」的基线。
+func _finish_p1_suite() -> void:
+	var scene: Node = (load(MAIN_SCENE) as PackedScene).instantiate()
+	root.add_child(scene)
+	await _wait(3)
+	await _run_p1_suite(scene)
+	scene.queue_free()
+	await _wait(2)
+	_finish()
+
+
+func _run_p1_suite(scene: Node) -> void:
+	var bricks: Node2D = scene.get_node("Bricks")
+	var balls: BallManager = _balls(scene)
+	var ball: Ball = balls.primary()
+	var base_hits := _base_hits_for_level(1)
+	var k_normal := _kind("NORMAL")
+	var k_armored := _kind("ARMORED")
+	var k_life := _kind("LIFE")
+	var k_bonus := _kind("BONUS")
+	var k_boom := _kind("EXPLOSIVE")
+	var k_split := _kind("SPLIT")
+	var k_slow := _kind("SLOW")
+
+	# ---------- 22a. 三张 kind 表与布局表自洽 ----------
+	_check(k_normal == 0,
+		"Brick.Kind.NORMAL 仍是 0（布局表写的是字面数字，序号不能重排）")
+	_check(_kinds.size() == 7 and _kind_names.size() == _kinds.size() and _kind_mult.size() == _kinds.size(),
+		"Brick.Kind / KIND_NAMES / KIND_POINTS_MULT 三张表等长（%d / %d / %d）"
+		% [_kinds.size(), _kind_names.size(), _kind_mult.size()])
+	var mult_ok := true
+	for m in _kind_mult:
+		if float(m) != roundf(float(m)) or int(m) < 1:
+			mult_ok = false
+	_check(mult_ok,
+		"KIND_POINTS_MULT 全为 >= 1 的整数（否则会打破「总分是每块砖分值整数倍」的不变量）")
+	_check(_armor_extra_hits >= 1 and _blast_radius > 0.0 and _slow_scale > 0.0 and _slow_scale < 1.0
+			and _slow_seconds > 0.0 and _split_spread_deg > 0.0 and _max_balls >= 2
+			and _max_lives >= _start_lives,
+		"加固耐久 / 爆破半径 / 减速倍率与时长 / 分裂夹角 / 同屏上限 / 生命上限均为有效值")
+
+	var rows: int = _brick_layout.size()
+	var cols: int = int((_brick_layout[0] as Array).size()) if rows > 0 else 0
+	_check(rows == int(_main_const("BRICK_ROWS", 0)) and cols == int(_main_const("BRICK_COLUMNS", 0)),
+		"BRICK_LAYOUT 尺寸与 BRICK_ROWS / BRICK_COLUMNS 一致（%d × %d）" % [rows, cols])
+	var bad_kind := 0
+	var ragged := 0
+	for r in rows:
+		var row: Array = _brick_layout[r] as Array
+		if row.size() != cols:
+			ragged += 1
+		for k in row:
+			if int(k) < 0 or int(k) >= _kinds.size():
+				bad_kind += 1
+	_check(ragged == 0 and bad_kind == 0,
+		"布局表每行等长且每个取值都落在 Brick.Kind 范围内（不齐 %d 行，越界 %d 项）" % [ragged, bad_kind])
+	var first_row_clean := true
+	for k in (_brick_layout[0] as Array):
+		if int(k) != k_normal:
+			first_row_clean = false
+	var last_row: Array = _brick_layout[rows - 1] as Array
+	_check(first_row_clean and int(last_row[cols - 2]) == k_normal and int(last_row[cols - 1]) == k_normal,
+		"第 1 行整行与末行末两位都是普通砖（第 14 / 15 节的断言锚点）")
+
+	# ---------- 22b. 真实砖墙与布局表逐格对得上 ----------
+	var built: Array = bricks.get_children()
+	var kind_bad := 0
+	var points_bad := 0
+	var hits_bad := 0
+	for i in built.size():
+		var kind: int = int(_brick_layout[i / cols][i % cols])
+		var b := built[i] as Brick
+		if int(b.kind) != kind:
+			kind_bad += 1
+		if b.points != _points_per_brick * int(_kind_mult[kind]):
+			points_bad += 1
+		var want_hits := base_hits + (_armor_extra_hits if kind == k_armored else 0)
+		if b.max_hits != want_hits:
+			hits_bad += 1
+	_check(built.size() == rows * cols and kind_bad == 0,
+		"运行时生成的 %d 块砖逐格对上 BRICK_LAYOUT 的 kind（错位 %d 块）" % [built.size(), kind_bad])
+	_check(points_bad == 0,
+		"每块砖的分数 == 每块砖分值 × 对应 kind 的倍率（错 %d 块）" % points_bad)
+	_check(hits_bad == 0,
+		"只有加固砖的耐久高于本关标准（错 %d 块，标准 %d + 加固 %d）"
+		% [hits_bad, base_hits, _armor_extra_hits])
+
+	var present := {}
+	for child in built:
+		present[int((child as Brick).kind)] = true
+	var absent: Array = []
+	for key: String in _kinds:
+		if int(_kinds[key]) != k_normal and not present.has(int(_kinds[key])):
+			absent.append(key)
+	_check(absent.is_empty(), "第 1 关真实覆盖全部 6 种特殊砖（缺 %s）" % str(absent))
+
+	var expected_names: Array[String] = []
+	for r in rows:
+		for k in (_brick_layout[r] as Array):
+			if int(k) == k_normal:
+				continue
+			var nm := String(_kind_names[int(k)])
+			if not expected_names.has(nm):
+				expected_names.append(nm)
+	_check(String(scene.call("_level_legend")) == " · ".join(expected_names),
+		"结算图例按行优先去重列出本关特殊砖（%s）" % " · ".join(expected_names))
+
+	# ---------- 22c. 结算面板的图例行（带默认参数，老调用方不受影响） ----------
+	var legend_row: Label = scene.get_node_or_null(PANEL_VBOX + "/LegendLabel") as Label
+	_check(legend_row != null and not legend_row.visible, "结算面板带图例行且默认隐藏")
+	(scene.get_node("GameOverPanel") as GameOverPanel).show_result(
+		0, 0, false, _state_game_over, 1, 0, 0, null, "特殊砖 " + " · ".join(expected_names))
+	await _wait(2)
+	_check(legend_row != null and legend_row.visible
+			and legend_row.text == "特殊砖 " + " · ".join(expected_names),
+		"传入图例后结算面板显示特殊砖图例行（%s）" % legend_row.text)
+	(scene.get_node("GameOverPanel") as GameOverPanel).show_result(0, 0, false, _state_game_over)
+	await _wait(2)
+	_check(not legend_row.visible, "不传图例时 show_result() 退回旧行为（图例行保持隐藏）")
+
+	# ---------- 22d. 加固砖：耐久高于本关标准 ----------
+	var staged := await _stage_bricks(scene, [[k_armored, Vector2(240.0, 200.0)]])
+	var armor: Brick = staged[0]
+	_check(armor.is_special() and armor.max_hits == base_hits + _armor_extra_hits,
+		"加固砖耐久 = 本关标准 %d + %d（实际 %d）" % [base_hits, _armor_extra_hits, armor.max_hits])
+	_freeze_ball_physics(balls)
+	var score_before: int = _gi(scene, "_score")
+	var armor_points: int = armor.points
+	ball.brick_hit.emit(armor)
+	await _wait(2)
+	_check(_gi(scene, "_score") == score_before + armor_points, "加固砖受击同样计分（%d 分）" % armor_points)
+	_check(_gi(scene, "_bricks_cleared") == 0 and int(armor.get("hits_left")) > 0,
+		"加固砖没打透就不消失、也不计入清除数")
+	for i in _armor_extra_hits:
+		ball.brick_hit.emit(armor)
+	await _wait(2)
+	_check(not is_instance_valid(armor) and _gi(scene, "_bricks_cleared") == 1,
+		"加固砖挨满 %d 次额外受击后碎掉并计入清除数" % _armor_extra_hits)
+
+	# ---------- 22e. 分数砖：倍率最高，但只是分多 ----------
+	staged = await _stage_bricks(scene, [[k_bonus, Vector2(240.0, 200.0)]])
+	var bonus: Brick = staged[0]
+	var bonus_points: int = bonus.points
+	score_before = _gi(scene, "_score")
+	ball.brick_hit.emit(bonus)
+	await _wait(2)
+	# 注意：分数必须在击破前取出来。砖被 queue_free 后再读它的字段，
+	# 拿到的是「previously freed」，整条断言会被静默跳过——那正是这条检查最不该出的错法。
+	_check(_gi(scene, "_score") == score_before + bonus_points,
+		"分数砖按自身倍率计分（%d 分）" % bonus_points)
+	_check(bonus_points == _points_per_brick * _max_kind_mult(),
+		"分数砖倍率是全表最高（×%d）" % _max_kind_mult())
+	_check(_gi(scene, "_lives") == _start_lives and balls.count() == 1,
+		"分数砖不额外改生命或球数")
+
+	# ---------- 22f. 生命砖：+1 但封顶 ----------
+	scene.set("_lives", _max_lives - 1)
+	staged = await _stage_bricks(scene, [[k_life, Vector2(240.0, 200.0)]])
+	var life_points: int = (staged[0] as Brick).points
+	ball.brick_hit.emit(staged[0])
+	await _wait(2)
+	_check(_gi(scene, "_lives") == _max_lives, "生命砖把生命补到上限 %d（实际 %d）"
+		% [_max_lives, _gi(scene, "_lives")])
+	staged = await _stage_bricks(scene, [[k_life, Vector2(240.0, 200.0)]])
+	life_points = (staged[0] as Brick).points
+	score_before = _gi(scene, "_score")
+	ball.brick_hit.emit(staged[0])
+	await _wait(2)
+	_check(_gi(scene, "_lives") == _max_lives, "生命已满时再吃生命砖不加命（上限 %d）" % _max_lives)
+	_check(_gi(scene, "_score") == score_before + life_points,
+		"生命已满时生命砖照样计分（不打断连击节奏）")
+
+	# ---------- 22g. 爆破砖：半径内波及、半径外不波及 ----------
+	# 邻居按「刚好在半径的 0.5 / 1.5 倍处」摆，期望值是手算的，不靠复算游戏算法
+	staged = await _stage_bricks(scene, [
+		[k_boom, Vector2(240.0, 200.0)],
+		[k_normal, Vector2(240.0 + _blast_radius * 0.5, 200.0)],
+		[k_normal, Vector2(240.0, 200.0 - _blast_radius * 0.5)],
+		[k_normal, Vector2(240.0 + _blast_radius * 1.5, 200.0)],
+	])
+	var center: Brick = staged[0]
+	var inside_h: Brick = staged[1]
+	var inside_v: Brick = staged[2]
+	var outside: Brick = staged[3]
+	# 存下坐标与耐久：被波及的三块砖在下一条断言前就已被 queue_free，
+	# 而半径外那块还活着，可以直接读
+	var outside_at: Vector2 = outside.position
+	var outside_hits: int = outside.max_hits
+	var blast_expected: int = center.points + inside_h.points + inside_v.points
+	_freeze_ball_physics(balls)
+	score_before = _gi(scene, "_score")
+	ball.brick_hit.emit(center)
+	await _wait(2)
+	var wave_shown := false
+	for fx_child in (scene.get_node("Fx") as Node2D).get_children():
+		if fx_child is BlastWave:
+			wave_shown = true
+	_check(wave_shown, "爆破砖击破时在 Fx 下生成冲击波")
+	_check(not is_instance_valid(inside_h) and not is_instance_valid(inside_v),
+		"爆破半径 0.5 倍处的两个邻居被清掉")
+	_check(is_instance_valid(outside) and int(outside.get("hits_left")) == outside_hits,
+		"爆破半径 1.5 倍处的砖毫发无损（distance %.1f > %.1f）"
+		% [Vector2(240.0, 200.0).distance_to(outside_at), _blast_radius])
+	_check(_gi(scene, "_score") == score_before + blast_expected,
+		"爆破得分 = 波及到的每块砖的分值之和（+%d）" % blast_expected)
+	_check(_gi(scene, "_bricks_cleared") == 3 and (bricks as Node2D).get_child_count() == 1,
+		"爆破把 3 块砖计入清除数（含半径外的存活者，实际剩余 %d 块）"
+		% (bricks as Node2D).get_child_count())
+	_check(_gi(scene, "_score") % _points_per_brick == 0,
+		"爆破波及后的总分仍是每块砖分值的整数倍")
+
+	# ---------- 22h. 爆破连锁 ----------
+	staged = await _stage_bricks(scene, [
+		[k_boom, Vector2(240.0, 200.0)],
+		[k_boom, Vector2(240.0 + _blast_radius * 0.5, 200.0)],
+		[k_normal, Vector2(240.0 + _blast_radius * 1.4, 200.0)],
+		[k_normal, Vector2(240.0 + _blast_radius * 2.2, 200.0)],
+	])
+	_freeze_ball_physics(balls)
+	ball.brick_hit.emit(staged[0])
+	await _wait(3)
+	_check(not is_instance_valid(staged[0]) and not is_instance_valid(staged[1]),
+		"连锁的第一环：正中心的砖与 0.5 倍处的第二颗炸弹都被清掉")
+	_check(not is_instance_valid(staged[2]),
+		"连锁的第二环：第二颗炸弹把离中心 1.4 倍、离自己 0.9 倍处的砖也炸掉")
+	_check(is_instance_valid(staged[3]), "隔得够远的砖在两环波及之外")
+	_check(_gi(scene, "_bricks_cleared") == 3,
+		"一次连锁按波及到的砖数逐块计入清除数（%d）" % _gi(scene, "_bricks_cleared"))
+
+	# ---------- 22i. 波及不触发被波及砖自身的效果（否则可无限刷球/刷命） ----------
+	scene.set("_lives", 2)
+	staged = await _stage_bricks(scene, [
+		[k_boom, Vector2(240.0, 200.0)],
+		[k_split, Vector2(240.0 + _blast_radius * 0.5, 200.0)],
+		[k_life, Vector2(240.0, 200.0 - _blast_radius * 0.5)],
+	])
+	_freeze_ball_physics(balls)
+	ball.brick_hit.emit(staged[0])
+	await _wait(3)
+	_check(balls.count() == 1, "被波及清掉的分裂砖不额外弹球（仍是 %d 颗）" % balls.count())
+	_check(_gi(scene, "_lives") == 2, "被波及清掉的生命砖不额外加命")
+
+	# ---------- 22j. 分裂砖：新球方向与出场位置 ----------
+	staged = await _stage_bricks(scene, [[k_split, Vector2(240.0, 300.0)]])
+	var split_brick: Brick = staged[0]
+	_freeze_ball_physics(balls)
+	ball.set("attached_to_paddle", false)
+	ball.velocity = Vector2(300.0, -300.0)
+	var heading := Vector2(300.0, -300.0).normalized()
+	var expected_dir := heading.rotated(deg_to_rad(_split_spread_deg))
+	var expected_at := Vector2(split_brick.position.x, split_brick.position.y + split_brick.size.y * 0.5 + 6.0)
+	var split_points: int = split_brick.points
+	var points_before_split: int = _gi(scene, "_score")
+	ball.brick_hit.emit(split_brick)
+	# 同步读：信号派发是同步的，这一刻新球还在生成点上，一个物理帧都没走
+	var spawned: Array[Ball] = balls.all_balls()
+	var new_ball: Ball = spawned[spawned.size() - 1]
+	var dir_error := new_ball.velocity.normalized().angle_to(expected_dir)
+	var at_error := new_ball.global_position.distance_to(expected_at)
+	_freeze_ball_physics(balls)
+	await _wait(2)
+	_check(balls.count() == 2, "分裂砖把场上球数从 1 变成 %d" % balls.count())
+	_check(not bool(new_ball.get("attached_to_paddle")),
+		"新球出厂即发射（不是吸附在挡板上）")
+	_check(dir_error < 0.01, "新球方向 = 原球方向偏开 %.0f°（实际偏差 %.4f 弧度）"
+		% [_split_spread_deg, dir_error])
+	_check(at_error < 1.0, "新球从砖块下沿生成（位置偏差 %.2f px）" % at_error)
+	_check(_gi(scene, "_score") == points_before_split + split_points,
+		"分裂砖自身照样计分")
+	var balls_label: Label = scene.get_node("HUD/BallsLabel") as Label
+	_check(balls_label.visible and balls_label.text == "球 ×%d" % balls.count(),
+		"HUD 同步显示球数（%s）" % balls_label.text)
+
+	# ---------- 22k. 同屏球数上限 ----------
+	var guard := 0
+	while balls.count() < _max_balls and guard < _max_balls + 2:
+		guard += 1
+		var more := await _stage_bricks(scene, [[k_split, Vector2(240.0, 300.0)]])
+		ball.brick_hit.emit(more[0])
+		_freeze_ball_physics(balls)
+		await _wait(1)
+	_check(balls.count() == _max_balls,
+		"连续吃分裂砖能把球数补到上限 %d（实际 %d）" % [_max_balls, balls.count()])
+	staged = await _stage_bricks(scene, [[k_split, Vector2(240.0, 300.0)]])
+	var capped_points: int = (staged[0] as Brick).points
+	score_before = _gi(scene, "_score")
+	ball.brick_hit.emit(staged[0])
+	await _wait(2)
+	_check(balls.count() == _max_balls,
+		"达到上限后再打分裂砖不再加球（仍为 %d 颗）" % balls.count())
+	_check(_gi(scene, "_score") == score_before + capped_points,
+		"上限下分裂砖仍然计分")
+	_check(_gi(scene, "_state") == _state_playing, "满屏 8 球也没有误判通关或结算")
+
+	# ---------- 22l. 减速砖：全场降速 + 到点自动恢复 ----------
+	# 先把上一小节攒满的 7 颗副球清掉：满屏状态下再断言「新球以减速状态出场」，
+	# 拿到的只会是 spawn_extra 的 null，测的就不是减速规则而是球数上限了。
+	_check(await _drop_extra_balls(scene) > 0, "先清空上一小节攒下的副球")
+	staged = await _stage_bricks(scene, [[k_slow, Vector2(240.0, 200.0)]])
+	var base_speed := _gf(balls, "ball_speed")
+	_freeze_ball_physics(balls)
+	ball.brick_hit.emit(staged[0])
+	await _wait(2)
+	_check(_gi(scene, "_slow_left") > 0.0, "减速砖开出一个正数的倒计时")
+	_check(absf(_gf(balls, "speed_scale") - _slow_scale) < 0.001
+			and all_frozen_slow(balls, _slow_scale),
+		"场上全部 %d 颗球都被压到 ×%.2f" % [balls.count(), _slow_scale])
+	_check(_gf(balls, "ball_speed") == base_speed,
+		"减速只改倍率、不改本关基准速率（否则倍率恢复后球会永久变慢）")
+	var hinted := String(scene.get_node("HUD/HintLabel").text)
+	_check(hinted.contains("减速") and hinted.contains("%.1f" % _slow_seconds),
+		"HUD 提示写明减速剩余时间（%s）" % hinted)
+	# 减速期间分裂出来的球也必须带减速，否则规则自相矛盾
+	var born_slow := balls.spawn_extra(Vector2(120.0, 300.0), Vector2(0.4, -1.0))
+	_freeze_ball_physics(balls)
+	_check(born_slow != null and absf(_gf(born_slow, "speed_scale") - _slow_scale) < 0.001,
+		"减速期间新生成的球也以减速状态出场")
+	# SLOW_SECONDS 游戏秒 / time_scale 4 = 四分之一真实秒，等它自然走完
+	await _wait(int(ceil(_slow_seconds * 60.0 / Engine.time_scale)) + 12)
+	_check(_gi(scene, "_slow_left") == 0.0
+			and absf(_gf(balls, "speed_scale") - 1.0) < 0.001
+			and all_frozen_slow(balls, 1.0),
+		"倒计时走完后全场球速自动恢复 ×1.00")
+	_check(absf(_gf(ball, "speed") - base_speed) < 0.001
+			and absf(float(ball.call("effective_speed")) - base_speed) < 0.001,
+		"恢复后的实际速率回到本关基准值 %.1f" % base_speed)
+	_check(String(scene.get_node("HUD/HintLabel").text).contains("蓄力"),
+		"减速结束后提示切回发射提示（%s）" % scene.get_node("HUD/HintLabel").text)
+
+	# ---------- 22m. 多球扣命规则：全部掉光才扣一条命 ----------
+	_freeze_ball_physics(balls)
+	await _wait(1)
+	scene.set("_lives", 2)
+	var topup_guard := 0
+	while balls.count() < 2 and topup_guard < _max_balls + 2:
+		topup_guard += 1
+		if balls.spawn_extra(Vector2(160.0, 320.0), Vector2(0.4, -1.0)) == null:
+			break
+		_freeze_ball_physics(balls)
+		await _wait(1)
+	scene.set("_lives", 2)
+	var lost_extra: Ball = balls.all_balls()[balls.all_balls().size() - 1]
+	lost_extra.emit_signal("fell_out_of_playfield")
+	await _wait(2)
+	_check(balls.count() >= 1 and _gi(scene, "_lives") == 2,
+		"掉一颗副球不扣命（还剩 %d 颗球，生命 %d）" % [balls.count(), _gi(scene, "_lives")])
+	# 每轮循环都带上界：掉球信号一旦失灵，这里就会变成一个永不结束的 while，
+	# CI 只会看到一个「跑到超时被杀」的作业，而看不到是哪条断言先坏掉。
+	var drain_guard := 0
+	while balls.count() > 1 and drain_guard < _max_balls + 2:
+		drain_guard += 1
+		(balls.all_balls()[balls.all_balls().size() - 1] as Ball).emit_signal("fell_out_of_playfield")
+		await _wait(1)
+	# 顺带验一条只有「多球」才存在的规则：掉光时整段连击作废而不是入账。
+	# 单球玩法里这条本来就成立，多球把它从「一次往返」变成「全部球都掉光」，判据必须重测。
+	scene.set("_combo", 5)
+	ball.emit_signal("fell_out_of_playfield")
+	await _wait(3)
+	_check(_gi(scene, "_combo") == 0, "全部球掉光时整段连击作废（不因掉球白送分）")
+	_check(_gi(scene, "_lives") == 1, "球全部掉光才扣 1 条命（2 -> %d）" % _gi(scene, "_lives"))
+	_check(bool(ball.get("attached_to_paddle")), "扣命后主球重新吸附到挡板等待再发射")
+	_check(balls.count() == 1, "重新吸附后场上又算 1 颗球")
+	_check(not bool(scene.get_node("HUD/BallsLabel").visible),
+		"回到单球后 HUD 收起球数显示")
+
+	# ---------- 22n. 换关清场：副球与减速状态都不跨关累积 ----------
+	# 走真实的关卡递进路径（清空砖墙 -> Level Clear -> 下一关）而不是直接调内部函数：
+	# 「新一关的第一颗球是不是干净的」正是玩家实际会遇到的情况。
+	# 直接按 PLAYING 态发 restart 是没用的——那个键只在结算态有效。
+	_check(balls.spawn_extra(Vector2(160.0, 320.0), Vector2(0.4, -1.0)) != null,
+		"换关前刻意攒出多球")
+	balls.apply_speed_scale(0.5)
+	await _wait(1)
+	_check(balls.count() == 2 and _gf(balls, "speed_scale") < 1.0,
+		"换关前场上有 2 颗球且处于减速中")
+	scene.set("_bricks_cleared", int(_main_const("BRICK_TOTAL", 0)))
+	scene.call("_check_level_cleared")
+	await _wait(3)
+	_check(_gi(scene, "_state") == _state_level_clear, "清空砖墙先进入 Level Clear")
+	_send_action(&"restart")
+	await _wait(8)
+	_check(_gi(scene, "_level") == 2 and balls.count() == 1,
+		"进入下一关清掉全部副球、只留主球（球数 %d）" % balls.count())
+	_check(absf(_gf(balls, "speed_scale") - 1.0) < 0.001,
+		"进入下一关清掉减速状态（新关不会带着上一关的慢球开局）")
+
+
+## 所有被冻住的球是否都处于给定倍率。逐颗比对而不是只看 BallManager 的字段：
+## 字段只说明「打算这么设」，逐颗读回才能抓住漏配某颗球的实现漏洞。
+func all_frozen_slow(balls: BallManager, scale: float) -> bool:
+	for b in balls.all_balls():
+		if absf(_gf(b, "speed_scale") - scale) > 0.001:
+			return false
+	return true
+
+
+## 倍率表里的最大值。maxi() 只接受标量，倍率表是数组，所以自己走一遍。
+func _max_kind_mult() -> int:
+	var top := 0
+	for m in _kind_mult:
+		top = maxi(top, int(m))
+	return top
+
+
+## 停掉场上所有球的物理。
+## P1 各条用例只靠信号驱动球：让球真的飞起来，一次偶然的碰撞就会改掉
+## 「刚好在爆破半径内 / 外」的邻居布置，于是期望值不再是手算出来的那个数——
+## 那时测的就不是游戏，是测试自己选的碰撞时机。
+func _freeze_ball_physics(balls: BallManager) -> void:
+	for b in balls.all_balls():
+		b.set_physics_process(false)
+
+
+## 按「kind + 坐标」清单摆一组砖，返回同顺序的砖数组，并把清除计数归零。
+## 用显式坐标而不是网格：爆破半径的断言需要「刚好在半径内」与「刚好在半径外」
+## 两个邻居，网格间距给不出这种精度，只能靠猜——那样这条用例就变成在测自己的猜测。
+func _stage_bricks(scene: Node, spec: Array) -> Array[Brick]:
+	var bricks_root: Node2D = scene.get_node("Bricks")
+	for child in bricks_root.get_children():
+		child.queue_free()
+	await _wait(2)
+	scene.set("_bricks_cleared", 0)
+	var base_hits := _base_hits_for_level(_gi(scene, "_level"))
+	var staged: Array[Brick] = []
+	for entry in spec:
+		var brick := Brick.new()
+		brick.kind = int(entry[0]) as Brick.Kind
+		brick.color = Color("4cc9f0")
+		brick.points = _points_per_brick * int(_kind_mult[int(entry[0])])
+		brick.max_hits = base_hits + (_armor_extra_hits if int(entry[0]) == _kind("ARMORED") else 0)
+		brick.position = entry[1] as Vector2
+		bricks_root.add_child(brick)
+		staged.append(brick)
+	await _wait(1)
+	return staged
+
+
 ## 跑完 P0 用例后释放专用场景，避免与前面各节的实例叠加。
+## 紧接第 22 节：P1 用例有自己的场景，同样在跑完后释放。
 func _finish_p0_suite(scene: Node) -> void:
 	await _run_p0_suite(scene)
 	scene.queue_free()
 	await _wait(2)
 
-	_finish()
+	await _finish_p1_suite()
 
 
 ## 把球恢复到「吸附在挡板上、等待发射」的干净状态。
 ## 上一节长时间飞行后球可能正在下落，直接改 y 不会触发掉球判定（吸附态每帧都被拉回），
 ## 所以先确保球真的在飞行中。
-func _ensure_attached(scene: Node) -> CharacterBody2D:
-	var ball: CharacterBody2D = scene.get_node("Ball") as CharacterBody2D
+func _ensure_attached(scene: Node) -> Ball:
+	var ball: Ball = _balls(scene).primary()
 	if not bool(ball.get("attached_to_paddle")):
 		await _wait(2)
 	if not bool(ball.get("attached_to_paddle")):
@@ -756,7 +1325,10 @@ func _ensure_attached(scene: Node) -> CharacterBody2D:
 
 
 func _run_p0_suite(scene: Node) -> void:
-	var p_ball := await _ensure_attached(scene)
+	# 与前面各节同一个理由：P1 的特殊砖不进这一节，否则爆破链与多球会改动
+	# 蓄力/连击/换肤这些用例依赖的砖数与时序基线
+	_degrade_special_bricks(scene.get_node("Bricks") as Node2D, _base_hits_for_level(1))
+	var p_ball: Ball = await _ensure_attached(scene)
 	var p_paddle: CharacterBody2D = scene.get_node("Paddle") as CharacterBody2D
 	var aim_line: Node2D = scene.get_node("AimLine")
 	var ball_trail: Node2D = scene.get_node("BallTrail")

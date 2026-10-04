@@ -10,6 +10,7 @@ const COMBO_POP_RISE := 26.0
 @onready var best_label: Label = $BestLabel
 @onready var lives_label: Label = $LivesLabel
 @onready var level_label: Label = $LevelLabel
+@onready var balls_label: Label = $BallsLabel
 @onready var hint_label: Label = $HintLabel
 @onready var combo_label: Label = $ComboLabel
 @onready var combo_pop: Label = $ComboPop
@@ -27,6 +28,7 @@ func _ready() -> void:
 	_pop_origin_y = combo_pop.position.y
 	combo_pop.visible = false
 	combo_label.visible = false
+	balls_label.visible = false
 
 
 func set_score(score: int, best_score: int) -> void:
@@ -40,6 +42,16 @@ func set_lives(lives: int) -> void:
 
 func set_level(level: int, max_level: int) -> void:
 	level_label.text = "第 %d / %d 关" % [level, max_level]
+
+
+## 场上球数。多球下「现在到底有几颗球在飞」是玩家必须随时知道的信息：
+## 掉球不再立刻扣命，玩家只能靠这个数字判断这一轮还剩几次机会。
+## 只有 >1 时显示——单球是常态，常驻一个「球 ×1」只会把连击这类
+## 真正需要被一眼看到的临时状态挤下去。
+func set_balls(count: int) -> void:
+	balls_label.visible = count > 1
+	if count > 1:
+		balls_label.text = "球 ×%d" % count
 
 
 func set_hint(text: String) -> void:
@@ -66,7 +78,7 @@ func set_accent(accent: Color) -> void:
 ## 用 add_theme_color_override 而不是改 Label.font_color：
 ## 后者会写进 Label 自己的资源副本，主题（Web 版靠内嵌字体）就再也管不到它了。
 func set_text_colors(primary: Color, secondary: Color) -> void:
-	for label in [score_label, lives_label, level_label, combo_label]:
+	for label in [score_label, lives_label, level_label, balls_label, combo_label]:
 		(label as Label).add_theme_color_override("font_color", primary)
 	for label in [best_label, hint_label]:
 		(label as Label).add_theme_color_override("font_color", secondary)

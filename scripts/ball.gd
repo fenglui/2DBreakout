@@ -23,9 +23,22 @@ const MAX_ANGLE_FROM_HORIZONTAL := 1.40
 const STUCK_FRAMES := 8
 ## 击中挡板时允许的最大偏转角（弧度）
 const MAX_DEFLECT_ANGLE := 1.0
+## 减速砖能把速度倍率压到的下限。再低球会长时间停在砖块间来回蹭，
+## 那不是「变慢」，是「卡住」，反而更难玩。
+const MIN_SPEED_SCALE := 0.4
+## 被减速时的霜色（画在球外圈，让「球怎么慢了」一眼可见）
+const FROST_COLOR := Color("8ecae6")
 
 @export var radius := 9.0
 @export var speed := DEFAULT_SPEED
+## 速度倍率（减速砖用），1.0 = 全速。与 speed 分开是因为两者的生命周期不同：
+## speed 是「本关基准速率」，换关才改；speed_scale 是「场上临时被打断的倍率」，
+## 减速砖随时开、随时关。两者相乘才是实际速率，所以这里绝不能直接改 speed。
+@export var speed_scale := 1.0:
+	set(value):
+		speed_scale = clampf(value, MIN_SPEED_SCALE, 1.0)
+		if is_inside_tree():
+			queue_redraw()
 ## 球色带 setter：换肤时 Main 会在动画中途改这个字段，
 ## 而 _draw 是缓存的，不主动重绘就会一直显示旧颜色。
 @export var color := Color("f8f9fa"):
@@ -49,13 +62,27 @@ var _stuck_frames := 0
 func _ready() -> void:
 	collision_layer = 8  # 第 4 层：Ball
 	collision_mask = 1 | 2 | 4  # 撞墙 / 挡板 / 砖块
-	# 用 radius 生成圆形碰撞形状（场景中已挂好 CollisionShape2D）
+	_apply_shape()
+	queue_redraw()
+
+
+## 写入圆形碰撞形状。形状节点不存在就新建：
+## Ball 现在由 BallManager 在运行时生成（分裂砖会多弹出一颗），
+## 没有场景里那份 CollisionShape2D 可依赖，建球就等于建出一个没有碰撞体的空节点。
+func _apply_shape() -> void:
 	var circle := CircleShape2D.new()
 	circle.radius = radius
 	var collision := get_node_or_null("CollisionShape2D") as CollisionShape2D
-	if collision != null:
-		collision.shape = circle
-	queue_redraw()
+	if collision == null:
+		collision = CollisionShape2D.new()
+		collision.name = "CollisionShape2D"
+		add_child(collision)
+	collision.shape = circle
+
+
+## 实际速率：基准速率 × 速度倍率。
+func effective_speed() -> float:
+	return speed * speed_scale
 
 
 ## 吸附到挡板上，等待发射。
@@ -82,7 +109,7 @@ func launch(direction: Vector2 = Vector2.ZERO) -> void:
 	var heading := direction
 	if heading.length_squared() < 0.0001:
 		heading = Vector2(randf_range(-0.22, 0.22), -1.0).normalized()
-	velocity = heading.normalized() * speed
+	velocity = heading.normalized() * effective_speed()
 	# 吸附态画下的发射提示箭头必须主动重绘才会消失，否则会被缓存一路跟着球飞
 	queue_redraw()
 
@@ -102,7 +129,7 @@ func _physics_process(_delta: float) -> void:
 		return
 
 	# 每一帧保持恒定速率，手感稳定
-	velocity = velocity.normalized() * speed
+	velocity = velocity.normalized() * effective_speed()
 	var from := global_position
 	move_and_slide()
 	_resolve_collisions()
@@ -157,7 +184,7 @@ func _clamp_direction() -> void:
 	var sign_x := 1.0 if velocity.x >= 0.0 else -1.0
 	var sign_y := 1.0 if velocity.y >= 0.0 else -1.0
 	angle = clampf(angle, MIN_ANGLE_FROM_HORIZONTAL, MAX_ANGLE_FROM_HORIZONTAL)
-	velocity = Vector2(cos(angle) * sign_x, sin(angle) * sign_y) * speed
+	velocity = Vector2(cos(angle) * sign_x, sin(angle) * sign_y) * effective_speed()
 
 
 ## 位移长期为 0 说明球被挤进了几何体内部，move_and_slide 推不出去，
@@ -178,7 +205,7 @@ func _track_stuck(from: Vector2) -> void:
 ## 只下移几个像素会正好挤进下一行砖块（行间距 26px），等于换个地方继续卡。
 func _unstick() -> void:
 	global_position.y = maxf(global_position.y + radius + 4.0, unstick_y)
-	velocity = Vector2(randf_range(-0.6, 0.6), 1.0).normalized() * speed
+	velocity = Vector2(randf_range(-0.6, 0.6), 1.0).normalized() * effective_speed()
 	_clamp_direction()
 
 
@@ -201,6 +228,11 @@ func _deflect_from_paddle() -> void:
 func _draw() -> void:
 	draw_circle(Vector2.ZERO, radius, color)
 	draw_circle(Vector2(-radius * 0.3, -radius * 0.3), radius * 0.35, Color(1, 1, 1, 0.65))
+	# 被减速时套一圈霜色描边：速度变化本身没有任何声音以外的提示，
+	# 玩家会以为「球怎么不听使唤了」，必须让状态在球身上直接可见。
+	if speed_scale < 1.0:
+		draw_arc(Vector2.ZERO, radius * 0.92, 0.0, TAU, 20,
+			Color(FROST_COLOR.r, FROST_COLOR.g, FROST_COLOR.b, 0.85), 2.0, true)
 	if attached_to_paddle:
 		# 吸附状态下的发射提示箭头：朝上，与发射方向一致
 		draw_colored_polygon(

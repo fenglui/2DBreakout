@@ -8,6 +8,8 @@ signal quit_requested()
 
 ## 结算统计标签，只在连击次数不为 0 时显示整行
 @onready var stats_label: Label = $Panel/Margin/VBox/StatsLabel
+## 本关特殊砖图例行，只在传了图例文本时显示
+@onready var legend_label: Label = $Panel/Margin/VBox/LegendLabel
 
 @onready var panel: PanelContainer = $Panel
 @onready var title_label: Label = $Panel/Margin/VBox/TitleLabel
@@ -30,9 +32,11 @@ func _ready() -> void:
 ## mode 取 Main.State 中的 GAME_OVER / LEVEL_CLEAR / WON 三种之一。
 ## best_combo / combo_total 展示连击战绩；为 0 时整行隐藏（第一关没打出连击很正常）。
 ## palette 传 null 时沿用默认强调色（老场景没配调色板也能跑）。
+## legend 是本关出现的特殊砖名列表，由 Main 按布局表现算后传入；
+## 留成带默认值的参数，老调用方（只关心分数的那套）不必跟着改。
 func show_result(final_score: int, best_score: int, is_new_best: bool, mode: int,
 		level: int = 1, best_combo: int = 0, combo_total: int = 0,
-		palette: Palette = null) -> void:
+		palette: Palette = null, legend: String = "") -> void:
 	match mode:
 		Main.State.LEVEL_CLEAR:
 			title_label.text = "第 %d 关通过！" % level
@@ -57,18 +61,26 @@ func show_result(final_score: int, best_score: int, is_new_best: bool, mode: int
 		stats_label.visible = true
 		stats_label.text = "最高连击 ×%d · 连击结算 %d 次" % [best_combo, combo_total]
 
+	# 特殊砖图例：这一关打的是哪些新砖，是玩家下一关最该带走的信息
+	legend_label.visible = not legend.is_empty()
+	if not legend.is_empty():
+		legend_label.text = legend
+
 	set_palette(palette)
 	panel.visible = true
 	continue_button.grab_focus()
 
 
-## 换肤用：标题与连击统计行吃当前关卡的强调色与主要文字色。
+## 换肤用：标题与连击统计行吃当前关卡的强调色与主要文字色，
+## 图例行走次要文字色（它只是索引，不该和统计数字抢注意力）。
 ## 不给面板整体上色——面板底色是 StyleBox 资源，改它会跨场景重载残留。
 func set_palette(palette: Palette) -> void:
 	var accent := Color("f9c74f") if palette == null else palette.accent
 	var primary := Color("ebf0ff") if palette == null else palette.text_primary
+	var secondary := Color("c9d9ec") if palette == null else palette.text_secondary
 	title_label.add_theme_color_override("font_color", primary)
 	stats_label.add_theme_color_override("font_color", accent)
+	legend_label.add_theme_color_override("font_color", secondary)
 
 
 func hide_result() -> void:
