@@ -1,0 +1,93 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/menu_panel.gd" id="1_menu"]
+
+[node name="MenuPanel" type="CanvasLayer"]
+script = ExtResource("1_menu")
+
+[node name="Panel" type="PanelContainer" parent="."]
+visible = false
+offset_left = 24.0
+offset_top = 132.0
+offset_right = 456.0
+offset_bottom = 588.0
+
+[node name="Margin" type="MarginContainer" parent="Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 24
+theme_override_constants/margin_top = 20
+theme_override_constants/margin_right = 24
+theme_override_constants/margin_bottom = 20
+
+[node name="VBox" type="VBoxContainer" parent="Panel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="TitleLabel" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 34
+text = "2D 打砖块"
+horizontal_alignment = 1
+
+[node name="SubLabel" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 14
+text = "选择玩法"
+horizontal_alignment = 1
+
+[node name="ClassicButton" type="Button" parent="Panel/Margin/VBox"]
+layout_mode = 2
+text = "经典关卡"
+
+[node name="ClassicDesc" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 13
+text = "3 关固定砖墙，无卡牌"
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="RunButton" type="Button" parent="Panel/Margin/VBox"]
+layout_mode = 2
+text = "无尽挑战"
+
+[node name="RunDesc" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 13
+text = "随机砖墙，无限关卡，每过一关抽一张卡牌"
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="DailyButton" type="Button" parent="Panel/Margin/VBox"]
+layout_mode = 2
+text = "每日挑战"
+
+[node name="DailyDesc" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 13
+text = "今日全球同一份砖墙与卡序"
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="DailyInfoLabel" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.976471, 0.780392, 0.298039, 1)
+theme_override_font_sizes/font_size = 13
+text = "今日种子 ABCDEF · 今日最佳 0 · 连续 0 天"
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="RunInfoLabel" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 13
+text = "无尽最佳 0 · 上局种子 ABCDEF"
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="QuitButton" type="Button" parent="Panel/Margin/VBox"]
+layout_mode = 2
+text = "退出游戏"

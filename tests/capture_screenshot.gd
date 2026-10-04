@@ -1,13 +1,14 @@
 extends SceneTree
-## 开发辅助脚本（不属于游戏流程）：启动 Main.tscn，自动发射并操控挡板，
-## 依次截取“蓄力瞄准 / 游戏进行中 / 特殊砖与多球 / 已暂停 / 游戏结束 / 关卡通过 /
-## 第 2 关耐久砖 / 通关”画面保存到 screenshots/，便于人工确认视觉效果。
+## 开发辅助脚本（不属于游戏流程）：启动 Main.tscn，先截玩法菜单，再选定经典模式、
+## 自动发射并操控挡板，依次截取"蓄力瞄准 / 游戏进行中 / 特殊砖与多球 / 已暂停 /
+## 游戏结束 / 关卡通过 / 第 2 关耐久砖 / 通关"，最后另开一局无尽挑战截"三选一抽卡"，
+## 全部保存到 screenshots/，便于人工确认视觉效果。
 ## 必须带窗口运行（不要加 --headless），否则不渲染、截不到图：
 ##   godot --path . --script res://tests/capture_screenshot.gd
 
 const OUT_DIR := "res://screenshots"
 const PANEL_VBOX := "GameOverPanel/Panel/Margin/VBox"
-## “蓄力瞄准”截图的蓄力门槛：攒到 0.3 再截，预测线偏角够明显。
+## "蓄力瞄准"截图的蓄力门槛：攒到 0.3 再截，预测线偏角够明显。
 ## 攒到 1.0 会触发自动发射，所以再用帧数上限兜底，防止低帧率下等不到门槛就先满了。
 const CHARGE_SHOT_AT := 0.3
 const CHARGE_SHOT_MAX_FRAMES := 20
@@ -17,18 +18,49 @@ func _initialize() -> void:
 	_run()
 
 
+## GameMode.Mode.CLASSIC 的值。从脚本常量反查而不是写 0：
+## 玩法枚举一旦重排，写死的 0 就指到别的模式上，截出来的图也会跟着对不上。
+func _classic_mode() -> int:
+	var script := load("res://scripts/game_mode.gd") as GDScript
+	if script == null:
+		return 0
+	return int((script.get_script_constant_map().get("Mode", {}) as Dictionary).get("CLASSIC", 0))
+
+
+## GameMode.Mode.RUN 的值。
+func _run_mode() -> int:
+	var script := load("res://scripts/game_mode.gd") as GDScript
+	if script == null:
+		return 1
+	return int((script.get_script_constant_map().get("Mode", {}) as Dictionary).get("RUN", 1))
+
+
+## 以指定模式开一局（同步调用，等同于在菜单上点了对应按钮）。
+## P3 之后 Main 启动即停在玩法菜单上，不选模式就一直是 MENU 态：
+## 球不飞、挡板不响应，下面所有靠发射与撞砖推进的截图都会截到一块静止的画面。
+func _begin(scene: Node, mode: int, run_seed: int = -1) -> void:
+	scene.call("_begin_run", mode, run_seed)
+	await _wait(3)
+
+
 func _run() -> void:
 	await process_frame
+
+	DirAccess.make_dir_recursive_absolute(OUT_DIR)
 
 	var scene: Node = (load("res://scenes/Main.tscn") as PackedScene).instantiate()
 	root.add_child(scene)
 	current_scene = scene
 	await physics_frame
 
+	# 玩法菜单：复玩性三件套的门面，也是唯一一张"还没开局"的截图
+	await _shot("menu.png")
+	print("[capture] 菜单 ", scene.get_node("MenuPanel/Panel/Margin/VBox/DailyInfoLabel").text)
+	await _begin(scene, _classic_mode())
+
 	var paddle: CharacterBody2D = scene.get_node("Paddle")
 	var balls: BallManager = scene.get_node("Balls")
 	var ball: Ball = balls.primary()
-	DirAccess.make_dir_recursive_absolute(OUT_DIR)
 
 	# 蓄力瞄准：按住 ← 让预测线斜着画出来，同时挡板蓄力条可见
 	_hold(&"move_left")
@@ -88,6 +120,8 @@ func _run() -> void:
 		print("[capture] 重开失败，跳过后续截图")
 		quit(0)
 		return
+	# 整场景重载出来的新实例同样停在玩法菜单上，得再选一次经典模式
+	await _begin(level_clear, _classic_mode())
 
 	var clear_bricks: Node2D = level_clear.get_node("Bricks")
 	var clear_ball: Ball = (level_clear.get_node("Balls") as BallManager).primary()
@@ -139,7 +173,51 @@ func _run() -> void:
 
 	print("[capture] done. score=", level2.get("_score"), " best=", level2.get("_best"),
 		" state=", level2.get("_state"), " 标题=", level2.get_node(PANEL_VBOX + "/TitleLabel").text)
+	await _capture_card_draft()
 	quit(0)
+
+
+## 「三选一抽卡」截图。
+##
+## 另开一局无尽挑战而不是接着经典局截：卡牌只存在于无尽模式，
+## 而经典局此刻正停在通关面板上，两条流程的界面会互相盖住。
+## 固定种子是为了让每次重截得到同一手牌 —— 换卡之后没法拿新旧两图做对比。
+func _capture_card_draft() -> void:
+	var run_seed := 20261005
+	var run_scene: Node = (load("res://scenes/Main.tscn") as PackedScene).instantiate()
+	root.add_child(run_scene)
+	await _wait(3)
+	await _begin(run_scene, _run_mode(), run_seed)
+
+	var bricks: Node2D = run_scene.get_node("Bricks")
+	var run_ball: Ball = (run_scene.get_node("Balls") as BallManager).primary()
+	var snapshot: Array = bricks.get_children()
+	# 关卡判定看 Main 的击破计数，先把计数推到"只剩两块"，再释放其余
+	run_scene.set("_bricks_cleared", snapshot.size() - 1)
+	for i in snapshot.size() - 1:
+		snapshot[i].queue_free()
+	await _wait(3)
+	var last: Node = bricks.get_child(0)
+	last.set("hits_left", 1)
+	run_ball.brick_hit.emit(last)
+	await _wait(3)
+
+	_send(&"restart")
+	await _wait(5)
+	var draft := run_scene.get_node("CardDraftPanel") as CardDraftPanel
+	await _shot("card_draft.png")
+	print("[capture] 抽卡 ", draft.offered.size(), " 张：",
+		_hand_summary(draft), " 副标题=", draft.get_node("Panel/Margin/VBox/SubLabel").text)
+	run_scene.queue_free()
+	await _wait(2)
+
+
+## 手牌摘要「宽板 / 疾风 / 贪婪」，打日志用。
+func _hand_summary(draft: CardDraftPanel) -> String:
+	var names: Array[String] = []
+	for card: Dictionary in draft.offered:
+		names.append(String(card["name"]))
+	return " / ".join(names)
 
 
 ## 「特殊砖与多球」截图。

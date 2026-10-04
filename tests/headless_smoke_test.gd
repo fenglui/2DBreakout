@@ -26,6 +26,10 @@ const SFX_SCRIPT := "res://scripts/sfx.gd"
 const BALL_SCRIPT := "res://scripts/ball.gd"
 const BRICK_SCRIPT := "res://scripts/brick.gd"
 const BALL_MANAGER_SCRIPT := "res://scripts/ball_manager.gd"
+const GAME_MODE_SCRIPT := "res://scripts/game_mode.gd"
+const LEVEL_GENERATOR_SCRIPT := "res://scripts/level_generator.gd"
+const CARD_POOL_SCRIPT := "res://scripts/card_pool.gd"
+const META_PROGRESS_SCRIPT := "res://scripts/meta_progress.gd"
 const SAVE_PATH := "user://2d_breakout_save.cfg"
 const PANEL_VBOX := "GameOverPanel/Panel/Margin/VBox"
 const PAUSE_VBOX := "PausePanel/Panel/Margin/VBox"
@@ -36,6 +40,9 @@ var _state_paused := -1
 var _state_game_over := -1
 var _state_level_clear := -1
 var _state_won := -1
+## P3 引入的两个界面态：Menu（启动玩法菜单）与 Draft（三选一抽卡）
+var _state_menu := -1
+var _state_draft := -1
 var _brick_total := 0
 var _points_per_brick := 0
 var _start_lives := 0
@@ -86,10 +93,16 @@ func _initialize() -> void:
 
 
 ## 删除历史存档，保证“最高分”断言不受上一次运行影响，测试可重复执行。
+## P3 的 MetaProgress 档案（每日最佳 / 连续天数）同样要清：
+## 它的连续打卡天数是跨运行累加的，不清的话第二次跑的 streak 断言必然失准。
 func _reset_save() -> void:
 	var dir := DirAccess.open("user://")
-	if dir != null and dir.file_exists("2d_breakout_save.cfg"):
-		dir.remove("2d_breakout_save.cfg")
+	if dir == null:
+		return
+	for name in ["2d_breakout_save.cfg", _meta_file_name()]:
+		if dir.file_exists(name):
+			dir.remove(name)
+	_meta_progress().forget_cache()
 
 
 ## 从 main.gd 读取 State 枚举与玩法常量，避免测试里维护一份会过期的副本。
@@ -104,6 +117,8 @@ func _bind_constants() -> void:
 	_state_game_over = int(states.get("GAME_OVER", -1))
 	_state_level_clear = int(states.get("LEVEL_CLEAR", -1))
 	_state_won = int(states.get("WON", -1))
+	_state_menu = int(states.get("MENU", -1))
+	_state_draft = int(states.get("DRAFT", -1))
 	_brick_total = int(consts.get("BRICK_TOTAL", 0))
 	_points_per_brick = int(consts.get("POINTS_PER_BRICK", 0))
 	_start_lives = int(consts.get("START_LIVES", 0))
@@ -148,6 +163,34 @@ func _bind_constants() -> void:
 ## Main 里没有第二份副本，不缓存是为了逼测试每次都从真实来源取。
 func _ball_manager_script() -> GDScript:
 	return load(BALL_MANAGER_SCRIPT) as GDScript
+
+
+## main.gd 的 GameMode.Mode.CLASSIC。用来给 _start_classic 传参，
+## 同样不写字面数字 0 —— 玩法枚举一旦重排，写死的 0 就指到别的模式上去了。
+func _mode_classic() -> int:
+	var game_mode := load(GAME_MODE_SCRIPT) as GDScript
+	if game_mode == null:
+		return 0
+	return int((game_mode.get_script_constant_map().get("Mode", {}) as Dictionary).get("CLASSIC", 0))
+
+
+## 让场景离开玩法菜单、以经典模式开打，返回是否成功。
+##
+## P3 之后游戏启动时落在玩法菜单上（经典 / 无尽 / 每日三选一），
+## 所以任何要断言「Playing 态下发生了什么」的用例都得先走过这一步。
+##
+## 这里调 Main._begin_run 而不是模拟按键：输入管线带一帧缓冲，
+## 而 _begin_run 是同步的——每处插一次"送 launch + 等若干帧"会让整套用例
+## 多出一批与被测逻辑无关的时序假设。菜单**按钮**点击路径由第 23 节单独验证，
+## 那里才是真正该覆盖交互的地方。
+func _start_classic(scene: Node) -> bool:
+	if scene == null:
+		return false
+	if not scene.has_method("_begin_run"):
+		push_error("Main 缺少 _begin_run，无法越过玩法菜单")
+		return false
+	scene.call("_begin_run", _mode_classic())
+	return true
 
 
 ## 主球。球不再挂在 Main 下而是归 Balls(BallManager) 所有，
@@ -360,6 +403,19 @@ func _run() -> void:
 	current_scene = scene
 	await physics_frame
 
+	# P3：启动后先落在玩法菜单上，先选经典模式进入 Playing 态。
+	_check(_state_menu >= 0, "main.gd 声明了 Menu 状态（启动界面）")
+	_check(_state_draft >= 0, "main.gd 声明了 Draft 状态（三选一抽卡）")
+	_check(bool(scene.get_node("MenuPanel/Panel").visible), "启动即打开玩法菜单")
+	_check(_gi(scene, "_state") == _state_menu, "菜单态下 Main 处于 Menu 状态")
+	_check(not bool(scene.get_node("Paddle").get("input_enabled")),
+		"菜单期间挡板不可操控（否则在菜单上按方向键会把背景挡板推走）")
+	_check(_start_classic(scene), "调用 _begin_run 进入经典模式")
+	await _wait(2)
+	_check(_gi(scene, "_state") == _state_playing, "选定玩法后回到 Playing 状态")
+	_check(not scene.get_node("MenuPanel/Panel").visible, "玩法菜单收起")
+	_check(bool(scene.get_node("Paddle").get("input_enabled")), "开局挡板恢复可操控")
+
 	var paddle: CharacterBody2D = scene.get_node("Paddle")
 	var balls: BallManager = _balls(scene)
 	var ball: Ball = balls.primary()
@@ -571,13 +627,22 @@ func _run() -> void:
 	_check(_gi(restarted, "_best") == best_on_disk, "重开后最高分从存档恢复（%d）" % _gi(restarted, "_best"))
 	_check(_gi(restarted, "_lives") == _start_lives, "重开后生命恢复为 %d" % _start_lives)
 	_check(_gi(restarted, "_level") == 1, "重开后回到第 1 关")
-	_check(bool(restarted.get_node("Paddle").get("input_enabled")), "重开后挡板恢复可操控")
+	# 重开是整场景重载，新实例停在玩法菜单上，挡板此时刻意不可操控
+	# （在菜单上按方向键会把背景挡板推走）。恢复可操控由下一节断言。
+	_check(_gi(restarted, "_state") == _state_menu, "重开后重新停在玩法菜单上")
+	_check(not bool(restarted.get_node("Paddle").get("input_enabled")),
+		"菜单态下挡板不可操控")
 	_check(restarted.get_node("Bricks").get_child_count() == _brick_total,
 		"重开后砖墙重新生成（%d 块）" % restarted.get_node("Bricks").get_child_count())
 	_check(absf(_gf(restarted.get_node("Paddle"), "paddle_width") - float(_paddle_widths[0])) < 0.01,
 		"重开后挡板恢复初始宽度（%.1f）" % _gf(restarted.get_node("Paddle"), "paddle_width"))
 
 	# ---------- 13. 关卡递进：清空砖墙先进入“关卡通过”，不是直接结束 ----------
+	# 重开是整场景重载，新场景同样停在玩法菜单上，得再选一次经典模式
+	_check(_start_classic(restarted), "重载后的新场景重新选定经典模式")
+	await _wait(2)
+	_check(_gi(restarted, "_state") == _state_playing, "重开后回到 Playing 状态")
+	_check(bool(restarted.get_node("Paddle").get("input_enabled")), "选定玩法后挡板恢复可操控")
 	# 重开是整场景重载，墙是重新生成的，得再降级一次（文件头说明了为什么）
 	_degrade_special_bricks(restarted.get_node("Bricks") as Node2D, _base_hits_for_level(1))
 	var bricks3: Node2D = restarted.get_node("Bricks")
@@ -792,6 +857,9 @@ func _run() -> void:
 	# 速度被归一化成 (430, 0) 却一帧不动）。
 	# 放在最后、用通关重开后的干净实例跑，避免这段长时间飞行影响前面各节的断言基线。
 	if restarted2 != null:
+		# 这个实例同样是重载出来的，一样停在菜单上
+		_start_classic(restarted2)
+		await _wait(2)
 		_degrade_special_bricks(restarted2.get_node("Bricks") as Node2D,
 			_base_hits_for_level(_gi(restarted2, "_level")))
 		var env_ball: Ball = _balls(restarted2).primary()
@@ -857,6 +925,8 @@ func _run() -> void:
 	var p0_scene: Node = (load(MAIN_SCENE) as PackedScene).instantiate()
 	root.add_child(p0_scene)
 	await _wait(3)
+	_start_classic(p0_scene)
+	await _wait(2)
 	_check(_gi(p0_scene, "_state") == _state_playing,
 		"P0 用例的专用场景处于 Playing 态（%d）" % _gi(p0_scene, "_state"))
 	await _finish_p0_suite(p0_scene)
@@ -872,10 +942,12 @@ func _finish_p1_suite() -> void:
 	await _run_p1_suite(scene)
 	scene.queue_free()
 	await _wait(2)
-	_finish()
+	await _finish_p3_suite()
 
 
 func _run_p1_suite(scene: Node) -> void:
+	_start_classic(scene)
+	await _wait(2)
 	var bricks: Node2D = scene.get_node("Bricks")
 	var balls: BallManager = _balls(scene)
 	var ball: Ball = balls.primary()
@@ -1714,3 +1786,1098 @@ func _ball_launch_arity() -> int:
 func _finish() -> void:
 	print("\n===== 冒烟测试结果：%d 项检查，%d 项失败 =====" % [_checks, _fails])
 	quit(1 if _fails > 0 else 0)
+
+
+# ================================================================
+#  第 23 节：P3 复玩性三件套 —— 三选一卡牌 / 程序化关卡 / 每日种子挑战
+# ================================================================
+# 与第 1~22 节分成独立的一节，原因和第 22 节一样但方向相反：
+# P3 的三条规则都会**主动破坏**「砖墙逐格等于 BRICK_LAYOUT」这条基线
+# （程序化生成会改墙、卡牌会改分数与耐久、抽卡界面会占住输入），
+# 复用前面的实例等于让 250 条旧断言在 P3 的规则下运行——它们当然会红，
+# 但红的原因是新系统的设计而不是回归，分不清就等于白跑。
+#
+# 这一节同时是「旧玩法没被 P3 破坏」的正面证据：
+# 23a~23c 是三套新系统的纯静态契约（不需要场景），
+# 23d~23k 才是真实的界面与对局流程。
+
+## —— 23 的外部辅助 ——
+
+## GameMode 脚本对象。
+func _game_mode() -> GDScript:
+	return load(GAME_MODE_SCRIPT) as GDScript
+
+
+## LevelGenerator 脚本对象。
+func _level_generator() -> GDScript:
+	return load(LEVEL_GENERATOR_SCRIPT) as GDScript
+
+
+## CardPool 脚本对象。
+func _card_pool() -> GDScript:
+	return load(CARD_POOL_SCRIPT) as GDScript
+
+
+## MetaProgress 脚本对象。
+func _meta_progress() -> GDScript:
+	return load(META_PROGRESS_SCRIPT) as GDScript
+
+
+## MetaProgress 的存档路径（user:// 全路径）。
+## 从脚本常量反查而不是在测试里再写一遍字面量：路径改了测试不该跟着改。
+func _meta_path() -> String:
+	return String(_meta_progress().get_script_constant_map().get("SAVE_PATH", ""))
+
+
+## MetaProgress 的存档文件名（user:// 下的纯文件名）。
+func _meta_file_name() -> String:
+	return _meta_path().get_file()
+
+
+## 往 MetaProgress 档案里直接塞一组字段，再丢掉内存缓存强制重读。
+## 用来把「连续打卡天数」推到指定的起点——真实的「昨天打过」没法在一次运行里造出来。
+##
+## 只改 fields 里出现的键，其余保持文件里的原值。
+## 要「从空白档案起步」必须先调 _clear_meta()：往已存在的档案上写几个字段
+## 并不会把没提到的字段复位（record_run 里 daily_best=700 会一直留在盘上）。
+func _seed_meta(fields: Dictionary) -> void:
+	_meta_progress().forget_cache()
+	var config := ConfigFile.new()
+	# 文件不存在时 load 返回非 OK；这是预期情况，下面就是往一份空档案上写。
+	config.load(_meta_path())
+	for key: String in fields:
+		config.set_value("meta", key, fields[key])
+	config.save(_meta_path())
+	_meta_progress().forget_cache()
+
+
+## 删掉 MetaProgress 的存档文件，回到「从没用过每日挑战」的状态。
+func _clear_meta() -> void:
+	var dir := DirAccess.open("user://")
+	if dir != null and dir.file_exists(_meta_file_name()):
+		dir.remove(_meta_file_name())
+	_meta_progress().forget_cache()
+
+
+## 取某个玩法模式的值。
+func _mode(mode_name: String) -> int:
+	var modes: Dictionary = _game_mode().get_script_constant_map().get("Mode", {})
+	return int(modes.get(mode_name, -1))
+
+
+## 抽卡面板上第 index 张牌的「选择」按钮。点它走的是真实按钮路径，
+## 而不是直接调面板的 choose()——那条是键盘分支的入口，鼠标分支得单独覆盖。
+func _draft_button(panel: Node, index: int) -> Button:
+	var cards: HBoxContainer = panel.get_node_or_null("Panel/Margin/VBox/Cards") as HBoxContainer
+	if cards == null or index >= cards.get_child_count():
+		return null
+	return cards.get_child(index).get_node_or_null("VBox/ChooseButton") as Button
+
+
+## 在砖墙里找第一块指定 kind 的砖。
+func _find_kind(bricks: Node2D, kind: int) -> Brick:
+	for child in bricks.get_children():
+		var brick := child as Brick
+		if brick != null and int(brick.kind) == kind:
+			return brick
+	return null
+
+
+## 生成一个全新场景并挂进树，等它进入 Menu 态。
+func _spawn_scene() -> Node:
+	var scene: Node = (load(MAIN_SCENE) as PackedScene).instantiate()
+	root.add_child(scene)
+	current_scene = scene
+	await _wait(3)
+	return scene
+
+
+## 把某个场景开到指定模式 / 种子（同步，便于断言前后的差异）。
+func _open_run(scene: Node, mode: int, run_seed: int = -1) -> void:
+	scene.call("_begin_run", mode, run_seed)
+	await _wait(2)
+
+
+## 让当前关立刻判定通关：把计数推到只剩最后一块，释放其余，再真实击破最后一块。
+## 复用第 13 / 15 节的做法——直接调 _settle() 会跳过结算面板与图例，
+## 而 P3 的抽卡入口正是挂在结算面板上的。
+func _clear_current_level(scene: Node, keep: int) -> void:
+	var bricks: Node2D = scene.get_node("Bricks")
+	var snapshot: Array = bricks.get_children()
+	# queue_free 帧末才生效，先把要点的最后几块的字段取好快照
+	var survivors: Array = snapshot.slice(maxi(0, snapshot.size() - keep))
+	scene.set("_bricks_cleared", _brick_total - survivors.size())
+	for i in snapshot.size() - survivors.size():
+		snapshot[i].queue_free()
+	await _wait(3)
+	for node in survivors:
+		if is_instance_valid(node):
+			node.set("hits_left", 1)
+	for node in survivors:
+		if is_instance_valid(node):
+			(_balls(scene).primary().brick_hit as Signal).emit(node)
+			break
+	await _wait(3)
+
+
+## 字体子集必须盖住全部界面文案。
+##
+## 手工测试第 19 条说「Web 版不能出现豆腐块」，但它只有在真的导出 Web、
+## 在浏览器里翻遍每一屏才看得出来。豆腐块本身不会报任何错：
+## Godot 对缺字形静默画空白，headless 冒烟测试一路全绿，
+## 问题要等到玩家打开网页才发现。唯一能提前抓住它的办法是
+## 在这里把「界面可能显示的字符」和「字体子集里有的字符」对一遍。
+##
+## 扫描规则必须和重建子集的脚本一致，否则会漏判：
+##   - 只扫**双引号字符串字面量**，不扫注释。注释里为了讲清规则会引几十个
+##     从不上屏的词（照扫会把子集从两百多字撑到几千字）。
+##   - 覆盖 scripts/ 与 scenes/；tests/ 里的断言文案不上屏，不算。
+## 判据用 Font.has_char()——它走 Godot 自己的字体栈（含 fallback），
+## 比「cmap 里有没有这个码位」更接近屏幕上的真实结果。
+const FONT_SCENES_DIR := "res://scenes"
+const FONT_SCRIPTS_DIR := "res://scripts"
+const FONT_RESOURCE := "res://fonts/ui-font.otf"
+
+
+## 界面文案可能出现的码位区间。刻意只收这三段：把整个 CJK 区块拉进来
+## 就等于放弃子集的意义了。
+func _is_ui_glyph_candidate(code: int) -> bool:
+	return (code >= 0x3000 and code <= 0x303F) \
+		or (code >= 0x4E00 and code <= 0x9FFF) \
+		or (code >= 0xFF00 and code <= 0xFFEF)
+
+
+## 从一个目录下的 .gd / .tscn 里收集双引号字面量中的界面字符。
+func _scan_ui_characters(dir_path: String, into: Dictionary) -> void:
+	var dir := DirAccess.open(dir_path)
+	if dir == null:
+		return
+	for file_name in dir.get_files():
+		if not (file_name.ends_with(".gd") or file_name.ends_with(".tscn")):
+			continue
+		var text := FileAccess.get_file_as_string(dir_path.path_join(file_name))
+		if text.is_empty():
+			continue
+		var from := 0
+		while true:
+			var open_at := text.find("\"", from)
+			if open_at < 0:
+				break
+			var close_at := text.find("\"", open_at + 1)
+			if close_at < 0:
+				break
+			from = close_at + 1
+			# 双引号之间的内容就是一个字面量；转义在本项目里不存在
+			for i in range(open_at + 1, close_at):
+				var code := text.unicode_at(i)
+				if _is_ui_glyph_candidate(code):
+					into[code] = true
+
+
+func _run_p3_font_subset() -> void:
+	var font := load(FONT_RESOURCE) as FontFile
+	_check(font != null, "字体资源可加载（%s）" % FONT_RESOURCE)
+	if font == null:
+		return
+
+	var needed := {}
+	_scan_ui_characters(FONT_SCRIPTS_DIR, needed)
+	_scan_ui_characters(FONT_SCENES_DIR, needed)
+	_check(not needed.is_empty(), "扫到了界面文案（%d 个字符）" % needed.size())
+
+	var missing: Array[int] = []
+	for code: int in needed:
+		if not font.has_char(code):
+			missing.append(code)
+	missing.sort()
+	var missing_text := ""
+	for code in missing:
+		missing_text += String.chr(code)
+	_check(missing.is_empty(),
+		"字体子集盖住全部界面文案（缺 %d/%d 个字形：%s）"
+		% [missing.size(), needed.size(), missing_text])
+
+
+# —— 23a~23k ——
+
+func _finish_p3_suite() -> void:
+	_run_p3_static_contracts()
+	_run_p3_level_generator()
+	_run_p3_card_pool()
+	await _run_p3_menu_flow()
+	await _run_p3_endless_flow()
+	await _run_p3_card_algebra()
+	await _run_p3_shield()
+	await _run_p3_reforge()
+	await _run_p3_daily()
+	await _run_p3_draft_panel_rebuild()
+	_run_p3_font_subset()
+	_finish()
+
+
+## ---------- 23a. GameMode 的静态契约 ----------
+func _run_p3_static_contracts() -> void:
+	var gm := _game_mode()
+	var pool := _card_pool()
+	var gen := _level_generator()
+	_check(gm != null and pool != null and gen != null,
+		"三套 P3 脚本都能加载（game_mode / card_pool / level_generator）")
+	if gm == null or pool == null or gen == null:
+		return
+
+	var gconsts: Dictionary = gm.get_script_constant_map()
+	var modes: Dictionary = gconsts.get("Mode", {})
+	var mode_names: Array = gconsts.get("MODE_NAMES", [])
+	var mode_count := int(gconsts.get("MODE_COUNT", 0))
+	_check(modes.size() == 3 and mode_names.size() == mode_count,
+		"GameMode.Mode 有 3 项且与 MODE_NAMES / MODE_COUNT 等长（%d/%d/%d）"
+		% [modes.size(), mode_names.size(), mode_count])
+	_check(int(gconsts.get("CLASSIC_SEED", -1)) == 0,
+		"CLASSIC_SEED 是 0（0 是 LevelGenerator「原样返回模板」的保留语义）")
+
+	var classic := int(modes.get("CLASSIC", -1))
+	var run_mode := int(modes.get("RUN", -1))
+	var daily := int(modes.get("DAILY", -1))
+	for m: int in [classic, run_mode, daily]:
+		if m < 0:
+			return
+	var name_bad: Array = []
+	for m: int in [classic, run_mode, daily]:
+		if gm.call("mode_name", m) != String(mode_names[m]):
+			name_bad.append(m)
+	_check(name_bad.is_empty(), "mode_name(i) == MODE_NAMES[i]（错 %s）" % str(name_bad))
+	_check(not bool(gm.call("is_endless", classic)) and bool(gm.call("is_endless", run_mode))
+			and bool(gm.call("is_endless", daily)),
+		"只有无尽与每日是无尽关卡（经典有最后一关）")
+	_check(not bool(gm.call("has_cards", classic)) and bool(gm.call("has_cards", run_mode)),
+		"只有无尽与每日抽卡（经典保持 P0/P1 的原样流程）")
+	_check(not bool(gm.call("tracks_progress", classic))
+			and bool(gm.call("tracks_progress", daily)),
+		"经典模式不写长期档案")
+
+	# 稳定哈希：每日挑战的全部前提。同一输入必得同值，不同输入不得同值。
+	var hash_script_ok := true
+	if int(gm.call("stable_hash", "abc")) != int(gm.call("stable_hash", "abc")) \
+			or int(gm.call("stable_hash", "abc")) == int(gm.call("stable_hash", "abd")) \
+			or int(gm.call("stable_hash", "")) != 2166136261:
+		hash_script_ok = false
+	_check(hash_script_ok,
+		"stable_hash 是自实现的 FNV-1a（不是随引擎版本漂移的内置 hash）")
+
+	var date_text := String(gm.call("daily_date_text"))
+	var date_ok := date_text.length() == 10 and date_text.substr(4, 1) == "-" \
+		and date_text.substr(7, 1) == "-"
+	_check(date_ok, "每日日期为 YYYY-MM-DD 格式（%s）" % date_text)
+	var daily_seed := int(gm.call("daily_seed"))
+	var expected_seed := int(gm.call("stable_hash", "daily:" + date_text)) \
+		& int(gconsts.get("SEED_MASK", 0x7FFFFFFF))
+	_check(daily_seed == expected_seed and daily_seed > 0,
+		"每日种子只由日期推导，重复调用恒等（%d）" % daily_seed)
+	_check(int(gm.call("daily_day_index")) > 0, "每日 UTC 天序号可用于连续天数计算")
+
+	# 种子码：可抄写，长度固定，字符表受限
+	var seed_len := int(gconsts.get("SEED_TEXT_LENGTH", 0))
+	var alphabet := String(gconsts.get("SEED_ALPHABET", ""))
+	var code := String(gm.call("seed_text", 123456789))
+	var code_chars_ok := code.length() == seed_len
+	for i in code.length():
+		if not alphabet.contains(code[i]):
+			code_chars_ok = false
+	_check(code_chars_ok and seed_len > 0,
+		"种子码长度固定且只用去混淆字符表（%s）" % code)
+	var codes_unique := true
+	var seen_codes := {}
+	for v: int in [1, 2, 3, 4, 5, 12345, 999999, 1073741823]:
+		var text := String(gm.call("seed_text", v))
+		if seen_codes.has(text):
+			codes_unique = false
+		seen_codes[text] = true
+	_check(codes_unique, "不同种子的种子码互不相同")
+
+	# seed_for_mode 必须挡住非经典模式拿到保留值 0，
+	# 否则无尽模式会拿到「原样模板」的墙，整局和经典没区别。
+	var forced := int(gm.call("seed_for_mode", run_mode, 0))
+	_check(forced != 0, "非经典模式不会拿到保留种子 0（得到 %d）" % forced)
+	_check(int(gm.call("seed_for_mode", classic, 987654)) == 0,
+		"经典模式无论传什么都固定为 0（种子 0 就是模板原样）")
+	_check(int(gm.call("begin_seed", classic)) == 0
+			and int(gm.call("begin_seed", daily)) == daily_seed,
+		"begin_seed：经典恒 0、每日按当天日期")
+
+
+## ---------- 23b. LevelGenerator 的静态契约 ----------
+func _run_p3_level_generator() -> void:
+	var gm := _game_mode()
+	var gen := _level_generator()
+	if gm == null or gen == null:
+		return
+	var rows: int = _brick_layout.size()
+	var cols: int = int((_brick_layout[0] as Array).size()) if rows > 0 else 0
+	var template_pristine := LevelGenerator.copy_layout(_brick_layout)
+
+	# 种子 0 必须逐位等于模板：经典模式的墙、老玩家的肌肉记忆、
+	# 以及第 22b 节那条「运行时砖墙逐格对上 BRICK_LAYOUT」全靠这一条。
+	var verbatim := 0
+	for level in 5:
+		var zero_layout: Array = gen.call("generate", 0, level + 1, _brick_layout)
+		for r in rows:
+			for c in cols:
+				if int(zero_layout[r][c]) != int(template_pristine[r][c]):
+					verbatim += 1
+	_check(verbatim == 0, "种子 0 在任意关卡都逐位等于模板（差异 %d 格）" % verbatim)
+
+	# 模板本身不能被生成过程写脏（BRICK_LAYOUT 是只读常量，
+	# 但生成器要是图省事直接返回原引用，改的就会是玩家的下一关）
+	gen.call("generate", 4242, 2, _brick_layout)
+	var template_dirty := 0
+	for r in rows:
+		for c in cols:
+			if int(_brick_layout[r][c]) != int(template_pristine[r][c]):
+				template_dirty += 1
+	_check(template_dirty == 0, "生成过程不回写传入的模板（被改 %d 格）" % template_dirty)
+
+	var anchors_ok := true
+	for r in rows:
+		for c in cols:
+			var want_anchor := r == 0 or (r == rows - 1 and (c == cols - 1 or c == cols - 2))
+			if bool(gen.call("is_anchor", r, c, rows, cols)) != want_anchor:
+				anchors_ok = false
+	_check(anchors_ok,
+		"is_anchor 只认「第 0 行整行 + 末行最后两块」（第 14 / 15 节的断言锚点）")
+
+	var k_normal := _kind("NORMAL")
+	var template_kinds := {}
+	for row in template_pristine:
+		for value in row:
+			if int(value) != k_normal:
+				template_kinds[int(value)] = true
+
+	var shape_bad := 0
+	var anchor_bad := 0
+	var kind_bad := 0
+	var missing_kinds: Array = []
+	var deterministic_bad := 0
+	var different_from_template := 0
+	var total_specials := {}
+	var test_seeds := [1, 7, 12345, 99991, 20261005, 2147483647]
+	for run_seed: int in test_seeds:
+		for level in 4:
+			var layout: Array = gen.call("generate", run_seed, level + 1, _brick_layout)
+			if layout.size() != rows:
+				shape_bad += 1
+				continue
+			var again: Array = gen.call("generate", run_seed, level + 1, _brick_layout)
+			if _layout_diff(layout, again) > 0:
+				deterministic_bad += 1
+			if _layout_diff(layout, template_pristine) > 0:
+				different_from_template += 1
+			total_specials[level + 1] = maxi(int(total_specials.get(level + 1, 0)),
+				int(gen.call("count_specials", layout)))
+			var present := {}
+			for r in rows:
+				var row: Array = layout[r] as Array
+				if row.size() != cols:
+					shape_bad += 1
+				for c in cols:
+					var kind := int(row[c])
+					if kind < 0 or kind >= _kinds.size():
+						kind_bad += 1
+					elif kind != k_normal:
+						present[kind] = true
+					if bool(gen.call("is_anchor", r, c, rows, cols)) and kind != k_normal:
+						anchor_bad += 1
+			for kind_value: int in template_kinds.keys():
+				if not present.has(kind_value):
+					missing_kinds.append("%d:L%d" % [kind_value, level + 1])
+
+	_check(shape_bad == 0, "任意种子下砖墙行列数不变（形状异常 %d 次）" % shape_bad)
+	_check(kind_bad == 0, "任意种子下每个 kind 都落在 Brick.Kind 范围内（越界 %d 处）" % kind_bad)
+	_check(anchor_bad == 0,
+		"任意种子下锚点格位始终是普通砖（被改 %d 格）" % anchor_bad)
+	_check(missing_kinds.is_empty(),
+		"任意种子下模板出现过的特殊砖都至少保留一块（缺 %s）" % str(missing_kinds))
+	_check(deterministic_bad == 0,
+		"同一对 (种子, 关卡) 必然生成同一张墙（不一致 %d 次）" % deterministic_bad)
+	_check(different_from_template == test_seeds.size() * 4,
+		"非 0 种子的墙与模板都不相同（%d/%d 组）"
+		% [different_from_template, test_seeds.size() * 4])
+	_check(int(total_specials.get(4, 0)) > int(total_specials.get(1, 0)),
+		"特殊砖数量随关卡递增（第 1 关 %d → 第 4 关 %d）"
+		% [int(total_specials.get(1, 0)), int(total_specials.get(4, 0))])
+
+	# 同一局不同关必须是不同的墙，否则「每关重新生成」这件事对玩家不可见
+	var per_level_same := 0
+	for run_seed: int in test_seeds:
+		var l1: Array = gen.call("generate", run_seed, 1, _brick_layout)
+		var l2: Array = gen.call("generate", run_seed, 2, _brick_layout)
+		if _layout_diff(l1, l2) == 0:
+			per_level_same += 1
+	_check(per_level_same == 0,
+		"同一局的第 1 / 2 关长得不一样（相同 %d 组）" % per_level_same)
+
+	# 两个不同种子之间也应当拉开距离，否则种子只是装饰
+	var too_similar := 0
+	for i in test_seeds.size():
+		for j in range(i + 1, test_seeds.size()):
+			var a: Array = gen.call("generate", test_seeds[i], 1, _brick_layout)
+			var b: Array = gen.call("generate", test_seeds[j], 1, _brick_layout)
+			var differing := 0
+			for r in rows:
+				for c in cols:
+					if int(a[r][c]) != int(b[r][c]):
+						differing += 1
+			if differing < 2:
+				too_similar += 1
+	_check(too_similar == 0,
+		"任意两个种子生成的墙都有可见差异（过近 %d 组）" % too_similar)
+
+
+## 两张布局表逐格比对，返回不同的格数。
+func _layout_diff(a: Array, b: Array) -> int:
+	var differing := 0
+	var rows: int = mini(a.size(), b.size())
+	for r in rows:
+		var row_a: Array = a[r] as Array
+		var row_b: Array = b[r] as Array
+		for c in mini(row_a.size(), row_b.size()):
+			if int(row_a[c]) != int(row_b[c]):
+				differing += 1
+	return differing
+
+
+## ---------- 23c. 菜单按钮 -> 开局（真实点击路径） ----------
+func _run_p3_menu_flow() -> void:
+	var gm := _game_mode()
+	if gm == null:
+		return
+	var run_mode := _mode("RUN")
+	var daily := _mode("DAILY")
+
+	# —— 无尽：从菜单点「无尽挑战」 ——
+	var scene: Node = await _spawn_scene()
+	var menu := scene.get_node("MenuPanel") as MenuPanel
+	_check(menu.has_signal("mode_chosen"), "玩法菜单暴露 mode_chosen 信号")
+	_check(scene.get_node("MenuPanel/Panel/Margin/VBox/ClassicButton") is Button,
+		"菜单提供经典模式按钮")
+	_check(scene.get_node("MenuPanel/Panel/Margin/VBox/RunButton") is Button,
+		"菜单提供无尽挑战按钮")
+	_check(scene.get_node("MenuPanel/Panel/Margin/VBox/DailyButton") is Button,
+		"菜单提供每日挑战按钮")
+	var daily_info := String(scene.get_node("MenuPanel/Panel/Margin/VBox/DailyInfoLabel").text)
+	_check(daily_info.contains(String(gm.call("seed_text", gm.call("daily_seed")))),
+		"菜单上直接显示今日种子码（%s）" % daily_info)
+
+	(menu.get_node("Panel/Margin/VBox/RunButton") as Button).pressed.emit()
+	await _wait(3)
+	_check(_gi(scene, "_state") == _state_playing, "点无尽挑战后进入 Playing 状态")
+	_check(_gi(scene, "_mode") == run_mode, "无尽模式生效（mode = %d）" % _gi(scene, "_mode"))
+	var run_seed := _gi(scene, "_seed")
+	_check(run_seed != 0, "无尽模式拿到非 0 的随机种子（%d）" % run_seed)
+	_check(not scene.get_node("MenuPanel/Panel").visible, "选完玩法后菜单收起")
+
+	var mode_label: Label = scene.get_node("HUD/ModeLabel") as Label
+	_check(mode_label.visible and mode_label.text.contains(String(gm.call("mode_name", run_mode)))
+			and mode_label.text.contains(String(gm.call("seed_text", run_seed))),
+		"HUD 常驻显示玩法与种子码（%s）" % mode_label.text)
+	var level_label := String(scene.get_node("HUD/LevelLabel").text)
+	_check(not level_label.contains("/"),
+		"无尽模式关卡号不写「第 N / 3 关」（%s）" % level_label)
+
+	# 顶层的「换玩法」：结算后的再来一局应该能回到菜单，而不是把模式打回经典
+	scene.call("_settle", _state_game_over)
+	await _wait(2)
+	_send_action(&"launch")
+	await _wait(4)
+	_check(_gi(scene, "_mode") == run_mode,
+		"无尽模式结算后重开仍是无尽（不会被场景重载打回经典）")
+	_check(_gi(scene, "_seed") == run_seed, "重开沿用同一副牌（种子 %d）" % _gi(scene, "_seed"))
+	_check(_gi(scene, "_level") == 1 and _gi(scene, "_score") == 0,
+		"重开回到第 1 关且分数归零")
+	_check(current_scene == scene, "无尽模式重开不整场景重载（节点是同一个）")
+	scene.queue_free()
+	await _wait(2)
+
+	# —— 每日：从菜单点「每日挑战」 ——
+	scene = await _spawn_scene()
+	var daily_seed := int(gm.call("daily_seed"))
+	(scene.get_node("MenuPanel/Panel/Margin/VBox/DailyButton") as Button).pressed.emit()
+	await _wait(3)
+	_check(_gi(scene, "_mode") == daily, "每日模式生效")
+	_check(_gi(scene, "_seed") == daily_seed,
+		"每日种子就是 GameMode.daily_seed()（%d）" % _gi(scene, "_seed"))
+	var daily_layout: Array = scene.get("_level_layout") as Array
+	var want_layout: Array = LevelGenerator.generate(daily_seed, 1, _brick_layout)
+	_check(_layout_diff(daily_layout, want_layout) == 0,
+		"每日第 1 关的墙 == 按今日种子生成的墙")
+	_check(_layout_diff(daily_layout, _brick_layout) > 0,
+		"每日第 1 关确实被程序化改写过（不是模板）")
+	scene.queue_free()
+	await _wait(2)
+
+	# —— 经典：种子 0，墙逐位等于模板 ——
+	scene = await _spawn_scene()
+	(scene.get_node("MenuPanel/Panel/Margin/VBox/ClassicButton") as Button).pressed.emit()
+	await _wait(3)
+	_check(_gi(scene, "_seed") == 0, "经典模式种子为 0")
+	_check(_layout_diff(scene.get("_level_layout") as Array, _brick_layout) == 0,
+		"经典模式的墙逐位等于 BRICK_LAYOUT（P3 对老玩法完全透明）")
+	_check(not (scene.get_node("HUD/ModeLabel") as Label).visible,
+		"经典模式不显示玩法徽标（固定关卡不需要）")
+
+	# —— 暂停面板上的「换个玩法」：不重开同一种子，而是回菜单 ——
+	# 走真实按钮路径：这条线一旦只在代码里接好、按钮忘了连线，
+	# 玩家按下去什么都不会发生，而自动测试完全看不出来。
+	_send_action(&"pause")
+	await _wait(2)
+	_check(_gi(scene, "_state") == _state_paused and paused, "经典局可暂停")
+	var menu_button := scene.get_node(PAUSE_VBOX + "/MenuButton") as Button
+	_check(menu_button != null and menu_button.visible,
+		"暂停面板提供「换个玩法」按钮（%s）"
+		% ("" if menu_button == null else String(menu_button.text)))
+	menu_button.pressed.emit()
+	await _wait(3)
+	_check(not paused, "点「换个玩法」后自动解除暂停")
+	_check(_gi(scene, "_state") == _state_menu, "点「换个玩法」回到 Menu 状态")
+	_check(scene.get_node("MenuPanel/Panel").visible, "玩法菜单重新打开")
+	_check(not scene.get_node("PausePanel/Panel").visible, "暂停遮罩同时收起")
+	# 换玩法的语义是「换」：同模式同种子重开会被玩家当成按钮坏了
+	_check(_gi(scene, "_level") == 1, "回菜单不推进关卡进度")
+	scene.queue_free()
+	await _wait(2)
+
+
+## ---------- 23d. 无尽对局：通关 -> 三选一 -> 卡牌生效 ----------
+func _run_p3_endless_flow() -> void:
+	var pool := _card_pool()
+	if pool == null:
+		return
+	var gm := _game_mode()
+	var run_mode := _mode("RUN")
+	var scene: Node = await _spawn_scene()
+	await _open_run(scene, run_mode, 20261005)
+
+	var layout: Array = scene.get("_level_layout") as Array
+	_check(_layout_diff(layout, _brick_layout) > 0,
+		"无尽模式第 1 关的墙被种子改写过")
+	var draft_panel := scene.get_node("CardDraftPanel") as CardDraftPanel
+	_check(not draft_panel.is_open() and (draft_panel.offered as Array).is_empty(),
+		"开局不发牌（发牌只发生在关卡通过之后）")
+
+	# —— 清空第 1 关 -> 关卡通过 ——
+	await _clear_current_level(scene, 1)
+	_check(_gi(scene, "_state") == _state_level_clear,
+		"无尽模式第 1 关清空后进入 Level Clear（没有 WON 这一说）")
+	_check(String(scene.get_node(PANEL_VBOX + "/ContinueButton").text) == "抽卡牌",
+		"结算面板按钮文案预告下一步是抽卡（%s）"
+		% scene.get_node(PANEL_VBOX + "/ContinueButton").text)
+	_check(String(scene.get_node("HUD/HintLabel").text).contains("卡牌"),
+		"HUD 提示同步预告抽卡（%s）" % scene.get_node("HUD/HintLabel").text)
+
+	# —— 继续 -> 抽卡界面 ——
+	_send_action(&"restart")
+	await _wait(4)
+	_check(_gi(scene, "_state") == _state_draft, "关卡通过后进入 Draft 状态")
+	_check(draft_panel.is_open(), "抽卡面板弹出")
+	_check(not scene.get_node("GameOverPanel/Panel").visible, "抽卡时结算面板收起")
+	var offered: Array = draft_panel.offered
+	_check(offered.size() == int(pool.get_script_constant_map().get("DRAFT_SIZE", 0)),
+		"发出 %d 张牌（实际 %d）" % [int(pool.get_script_constant_map().get("DRAFT_SIZE", 0)),
+			offered.size()])
+	var offered_ids := {}
+	var offered_unique := true
+	for card: Dictionary in offered:
+		var card_id := String(card["id"])
+		if offered_ids.has(card_id):
+			offered_unique = false
+		offered_ids[card_id] = true
+	_check(offered_unique, "同一手牌不重复")
+	var cards_root := draft_panel.get_node("Panel/Margin/VBox/Cards") as HBoxContainer
+	_check(cards_root.get_child_count() == offered.size(),
+		"卡面节点数与牌数一致（%d 个）" % cards_root.get_child_count())
+	var first_button := _draft_button(draft_panel, 0)
+	_check(first_button != null and first_button.has_focus(),
+		"抽卡面板把焦点落在第一张牌上（回车即可确认）")
+	var sub_text := String(draft_panel.get_node("Panel/Margin/VBox/SubLabel").text)
+	_check(sub_text.contains("第 1 关通过") and sub_text.contains("0 张"),
+		"副标题写明刚通过的关卡与本局已选张数（%s）" % sub_text)
+
+	# 同一手牌必须是「这一关的这个种子」唯一确定的，否则每日挑战无法比较成绩
+	var replay: Array = pool.call("draft", 20261005, 1, {}, 0)
+	var replay_ids := {}
+	for card: Dictionary in replay:
+		replay_ids[String(card["id"])] = true
+	var replay_match := replay_ids.size() == offered_ids.size()
+	for card_id: String in offered_ids.keys():
+		if not replay_ids.has(card_id):
+			replay_match = false
+	_check(replay_match, "同一关同一子数的抽卡结果可复现（每日挑战同一天必须一致）")
+
+	# —— 点第一张牌的「选择」按钮 ——
+	var chosen: Dictionary = offered[0]
+	var mods: Dictionary = chosen["mods"] as Dictionary
+	var score_mult := int(mods.get("score_mult", 1))
+	var brick_hits_add := int(mods.get("brick_hits", 0))
+	var armor_add := int(mods.get("armor_add", 0))
+	var paddle_bonus := float(mods.get("paddle_bonus", 0.0))
+	var lives_bonus := int(mods.get("extra_lives", 0))
+	var max_lives_add := int(mods.get("max_lives_add", 0))
+
+	first_button.pressed.emit()
+	await _wait(4)
+	_check(not draft_panel.is_open(), "选牌后面板收起")
+	_check(_gi(scene, "_state") == _state_playing, "选牌后回到 Playing 状态")
+	_check(_gi(scene, "_level") == 2, "选牌后进入第 2 关（当前 %d）" % _gi(scene, "_level"))
+	_check(_gi(scene, "_card_taken") == 1, "本局已选卡数记为 1")
+	var owned: Dictionary = scene.get("_card_owned") as Dictionary
+	_check(int(owned.get(String(chosen["id"]), 0)) == 1,
+		"选中的卡记进本局持有表（%s）" % String(chosen["id"]))
+
+	# 卡面每一类加成都在游戏里有着落
+	var want_speed_mul := clampf(float(mods.get("speed_mul", 1.0)),
+		float(_main_const("CARD_SPEED_MUL_MIN", 0.0)), float(_main_const("CARD_SPEED_MUL_MAX", 9.0)))
+	_check(is_equal_approx(float(scene.call("_card_speed_mul")), want_speed_mul),
+		"球速倍率生效（%.4f）" % float(scene.call("_card_speed_mul")))
+	_check(is_equal_approx(float(scene.call("_card_blast_radius")),
+			_blast_radius + float(mods.get("blast_add", 0.0))),
+		"爆炸半径生效（%.1f）" % float(scene.call("_card_blast_radius")))
+	_check(is_equal_approx(float(scene.call("_card_slow_seconds")),
+			_slow_seconds + float(mods.get("slow_add", 0.0))),
+		"减速时长生效（%.1f 秒）" % float(scene.call("_card_slow_seconds")))
+	_check(float(scene.call("_card_split_spread_deg"))
+			>= _split_spread_deg - 0.001,
+		"分裂夹角随卡牌不减小（%.1f 度）" % float(scene.call("_card_split_spread_deg")))
+
+	var balls := _balls(scene)
+	var want_cap := _max_balls + int(mods.get("max_balls_add", 0))
+	_check(int(scene.call("_card_max_balls")) == want_cap
+			and int(balls.get("max_balls_cap")) == want_cap,
+		"同屏球数上限写入 BallManager（%d）" % int(balls.get("max_balls_cap")))
+
+	# 加成要真正落到砖块属性上，而不是只存在卡表里
+	var bricks2: Node2D = scene.get_node("Bricks")
+	var base_hits2 := _base_hits_for_level(2)
+	var points_bad := 0
+	var hits_bad := 0
+	for child in bricks2.get_children():
+		var brick := child as Brick
+		var want_points := _points_per_brick * int(_kind_mult[int(brick.kind)]) * score_mult
+		var want_hits := base_hits2 + brick_hits_add \
+			+ (_armor_extra_hits + armor_add if int(brick.kind) == _kind("ARMORED") else 0)
+		if brick.points != want_points:
+			points_bad += 1
+		if int(brick.max_hits) != want_hits:
+			hits_bad += 1
+	_check(points_bad == 0, "分数倍率写进每块砖的 points（错 %d 块）" % points_bad)
+	_check(hits_bad == 0,
+		"耐久加成写进每块砖的 max_hits（错 %d 块，本关标准 %d）" % [hits_bad, base_hits2])
+	_check(absf(_gf(scene.get_node("Paddle"), "paddle_width")
+			- (float(_paddle_widths[0]) + paddle_bonus)) < 0.01,
+		"挡板加宽落到挡板（%.1f）" % _gf(scene.get_node("Paddle"), "paddle_width"))
+	_check(_gi(scene, "_lives") == mini(_start_lives + lives_bonus, _max_lives + max_lives_add),
+		"即时生命加成当场生效（%d 条命）" % _gi(scene, "_lives"))
+
+	# 分数倍率是整数，「总分是每块砖分值整数倍」这条不变量才成立
+	var first_points := (_find_kind(bricks2, _kind("NORMAL")) as Brick).points
+	_check(first_points % _points_per_brick == 0,
+		"分数倍率是整数倍，分值 %d 仍是每块砖基础分的整数倍" % first_points)
+
+	# —— 跳过也能进下一关 ——
+	await _clear_current_level(scene, 1)
+	_send_action(&"restart")
+	await _wait(4)
+	_check(_gi(scene, "_state") == _state_draft and draft_panel.is_open(),
+		"第 2 关通过后再次抽卡")
+	_send_action(&"restart")
+	await _wait(4)
+	_check(_gi(scene, "_level") == 3 and _gi(scene, "_state") == _state_playing,
+		"跳过抽卡直接进第 3 关（当前 %d 关）" % _gi(scene, "_level"))
+	_check(_gi(scene, "_card_taken") == 1, "跳过不增加已选张数")
+	scene.queue_free()
+	await _wait(2)
+
+	# —— 键盘 1 / 2 / 3 选牌与 R 跳过 ——
+	scene = await _spawn_scene()
+	await _open_run(scene, run_mode, 777)
+	await _clear_current_level(scene, 1)
+	_send_action(&"restart")
+	await _wait(4)
+	_check(_gi(scene, "_state") == _state_draft, "无尽模式可重复进入抽卡界面")
+	draft_panel = scene.get_node("CardDraftPanel") as CardDraftPanel
+	_send_key(KEY_2)
+	await _wait(4)
+	_check(_gi(scene, "_level") == 2 and _gi(scene, "_card_taken") == 1,
+		"数字键 2 选中第二张牌并进入下一关")
+	await _clear_current_level(scene, 1)
+	_send_action(&"restart")
+	await _wait(4)
+	_send_key(KEY_R)
+	await _wait(4)
+	_check(_gi(scene, "_level") == 3 and _gi(scene, "_card_taken") == 1,
+		"R 键跳过抽卡（已选张数不变）")
+	scene.queue_free()
+	await _wait(2)
+
+
+## 送一次按键（走真实的 _unhandled_input 分发）。
+## 用 parse_input_event 而不是 action_press：数字键不在 InputMap 里，
+## 只有事件派发这一条路能到达 Main 的 keycode 分支。
+func _send_key(keycode: Key) -> void:
+	var press := InputEventKey.new()
+	press.keycode = keycode
+	press.physical_keycode = keycode
+	press.pressed = true
+	Input.parse_input_event(press)
+	var release := InputEventKey.new()
+	release.keycode = keycode
+	release.physical_keycode = keycode
+	release.pressed = false
+	Input.parse_input_event(release)
+
+
+## ---------- 23e. 卡牌加成的叠算规则（加法 / 乘法 / 即时） ----------
+func _run_p3_card_algebra() -> void:
+	var pool := _card_pool()
+	if pool == null:
+		return
+	var scene: Node = await _spawn_scene()
+	await _open_run(scene, _mode("RUN"), 31337)
+
+	var wide := CardPool.card_by_id("wide")
+	var swift := CardPool.card_by_id("swift")
+	var greedy := CardPool.card_by_id("greedy")
+	var ward := CardPool.card_by_id("ward")
+	var fountain := CardPool.card_by_id("fountain")
+	_check(not wide.is_empty() and not swift.is_empty() and not greedy.is_empty()
+			and not ward.is_empty() and not fountain.is_empty(),
+		"卡表里能找到加法 / 乘法 / 即时三类代表卡")
+
+	# 加法型：两张「宽板」叠成两倍加宽
+	var wide_add := float((wide["mods"] as Dictionary).get("paddle_bonus", 0.0))
+	scene.call("_apply_card", wide)
+	scene.call("_apply_card", wide)
+	_check(is_equal_approx(float(scene.call("_card_paddle_bonus")), wide_add * 2.0),
+		"加法型卡叠加（挡板 +%.1f）" % float(scene.call("_card_paddle_bonus")))
+	# 乘法型：两张「疾风」叠成倍率的平方
+	var swift_mul := float((swift["mods"] as Dictionary).get("speed_mul", 1.0))
+	scene.call("_apply_card", swift)
+	scene.call("_apply_card", swift)
+	_check(is_equal_approx(float(scene.call("_card_speed_mul")), swift_mul * swift_mul),
+		"乘法型卡叠乘（球速 ×%.4f）" % float(scene.call("_card_speed_mul")))
+
+	scene.call("_reset_cards")
+	scene.call("_apply_card", greedy)
+	scene.call("_apply_card", greedy)
+	_check(int(scene.call("_card_score_mult")) == 4,
+		"两张「贪婪」把分数倍率叠到 4 倍（实际 %d）" % int(scene.call("_card_score_mult")))
+	scene.call("_reset_cards")
+	scene.call("_apply_card", ward)
+	scene.call("_apply_card", ward)
+	_check(_gi(scene, "_shield") == 2, "两张「护盾」叠出 2 次抵消（实际 %d）" % _gi(scene, "_shield"))
+
+	scene.call("_reset_cards")
+	var extra := int((fountain["mods"] as Dictionary).get("extra_lives", 0))
+	var cap_add := int((fountain["mods"] as Dictionary).get("max_lives_add", 0))
+	scene.call("_apply_card", fountain)
+	_check(_gi(scene, "_lives") == mini(_start_lives + extra, _max_lives + cap_add),
+		"「生命之泉」当场加命并抬高上限（%d 条命 / 上限 %d）"
+		% [_gi(scene, "_lives"), int(scene.call("_max_lives"))])
+	# 即时键不进累积表：否则「加 2 命」会在之后每次查询时被重复执行
+	var mods_now: Dictionary = scene.get("_card_mods") as Dictionary
+	_check(not mods_now.has("extra_lives"),
+		"即时型键不进累积加成表（不会被反复结算）")
+
+	# 空卡防御：面板在牌池见底时会发 draft_skipped 而不是选中一张空卡
+	scene.call("_reset_cards")
+	scene.call("_apply_card", {})
+	_check(_gi(scene, "_card_taken") == 0, "空卡字典被安全忽略")
+
+	# 新一局清空全部卡牌：卡牌是「本局内」的成长，跨局继承会让第二局没牌可抽
+	scene.call("_apply_card", greedy)
+	scene.call("_start_new_game")
+	_check(_gi(scene, "_card_taken") == 0 and int(scene.call("_card_score_mult")) == 1,
+		"新一局清空全部卡牌状态")
+	scene.queue_free()
+	await _wait(2)
+
+
+## ---------- 23f. 卡池：上限、确定性、保底 ----------
+func _run_p3_card_pool() -> void:
+	var pool := _card_pool()
+	if pool == null:
+		return
+	var pconsts := pool.get_script_constant_map()
+	var cards: Array = pconsts.get("CARDS", [])
+	var rarity_names: Array = pconsts.get("RARITY_NAMES", [])
+	var rarity_weights: Array = pconsts.get("RARITY_WEIGHTS", [])
+	var rare_from := int(pconsts.get("RARE_FROM_LEVEL", 0))
+	_check(cards.size() >= 10,
+		"卡池至少 10 张（实际 %d 张，够三选一重复出牌不重样）" % cards.size())
+	_check(rarity_weights.size() == rarity_names.size(),
+		"稀有度权重表与名称表等长（%d/%d）"
+		% [rarity_weights.size(), rarity_names.size()])
+
+	var id_bad: Array = []
+	var rarity_bad: Array = []
+	var stack_bad: Array = []
+	var weight_bad: Array = []
+	var unknown_key: Array = []
+	var non_int_mult: Array = []
+	var empty_copy: Array = []
+	var seen_ids := {}
+	for card: Dictionary in cards:
+		var card_id := String(card["id"])
+		if seen_ids.has(card_id):
+			id_bad.append(card_id)
+		seen_ids[card_id] = true
+		if String(card["name"]).is_empty() or String(card["desc"]).is_empty():
+			empty_copy.append(card_id)
+		var rarity := int(card["rarity"])
+		if rarity < 0 or rarity >= rarity_names.size():
+			rarity_bad.append(card_id)
+		if int(card["max_stack"]) < 1:
+			stack_bad.append(card_id)
+		if int(card["weight"]) < 1:
+			weight_bad.append(card_id)
+		for key: String in (card["mods"] as Dictionary):
+			if not CardPool.is_additive(key) and not CardPool.is_multiplied(key) \
+					and not CardPool.is_immediate(key):
+				unknown_key.append("%s:%s" % [card_id, key])
+			if CardPool.is_multiplied(key) and key != "speed_mul" \
+					and float((card["mods"] as Dictionary)[key]) != roundf(float((card["mods"] as Dictionary)[key])):
+				non_int_mult.append("%s:%s" % [card_id, key])
+	_check(id_bad.is_empty(), "每张卡的 id 唯一（重复 %s）" % str(id_bad))
+	_check(empty_copy.is_empty(), "每张卡都有名字与说明（缺文案 %s）" % str(empty_copy))
+	_check(rarity_bad.is_empty(), "稀有度落在名称表范围内（越界 %s）" % str(rarity_bad))
+	_check(stack_bad.is_empty(), "每张卡都有可用的叠加上限（错 %s）" % str(stack_bad))
+	_check(weight_bad.is_empty(), "每张卡都有正权重（错 %s）" % str(weight_bad))
+	_check(unknown_key.is_empty(),
+		"每张卡的 mods 键都在三张白名单里（未知键 %s）" % str(unknown_key))
+	_check(non_int_mult.is_empty(),
+		"分数 / 连击倍率都是整数（否则打破「总分是基础分整数倍」的不变量）：%s" % str(non_int_mult))
+
+	_check(CardPool.card_by_id("__不存在__").is_empty(), "查不到 id 时返回空字典而不是 null")
+	_check(CardPool.eligible_ids({}).size() == cards.size(), "没选过牌时全部卡都可抽")
+
+	# 叠满的卡不再出现
+	var owned := {}
+	var maxed_id := String(cards[0]["id"])
+	owned[maxed_id] = int(cards[0]["max_stack"])
+	var leaked := 0
+	for s in 8:
+		for card: Dictionary in pool.call("draft", s * 7919 + 1, 1, owned, 0):
+			if String(card["id"]) == maxed_id:
+				leaked += 1
+	_check(leaked == 0, "叠满 %s（%d 张）之后不再出现（漏 %d 次）"
+		% [maxed_id, int(cards[0]["max_stack"]), leaked])
+
+	# 全叠满时抽卡返回空数组，Main 靠它走「跳过」而不是卡在空界面
+	var all_maxed := {}
+	for card: Dictionary in cards:
+		all_maxed[String(card["id"])] = int(card["max_stack"])
+	_check((pool.call("draft", 1234, 1, all_maxed, 0) as Array).is_empty()
+			and CardPool.eligible_ids(all_maxed).is_empty(),
+		"全部叠满时牌池见底（发空数组，界面自动跳过）")
+
+	# 确定性 + 无重复 + 保底
+	var size := int(pconsts.get("DRAFT_SIZE", 0))
+	var nondeterministic := 0
+	var repeated := 0
+	var rare_miss := 0
+	var salt_varied := false
+	for s in 20:
+		var run_seed := 1000 + s * 104729
+		var hand: Array = pool.call("draft", run_seed, 1, {}, 0)
+		var again: Array = pool.call("draft", run_seed, 1, {}, 0)
+		if _hand_ids(hand) != _hand_ids(again):
+			nondeterministic += 1
+		if hand.size() != mini(size, cards.size()):
+			repeated += 1
+		var unique := {}
+		for card_id: String in _hand_ids(hand):
+			if unique.has(card_id):
+				repeated += 1
+			unique[card_id] = true
+		# 盐必须真的参与抽卡，否则玩家「跳过再抽」永远看到同一手牌。
+		# 不断言「每次换盐都换一手」——15 选 3 的两张手牌本来就可能撞车，
+		# 把它写成硬要求等于给自己埋一条偶发红灯。真正要保证的是
+		# 「盐参与了运算」：固定种子下扫一批盐，必须出现过不止一手牌。
+		for salt in 8:
+			var salted := _hand_ids(pool.call("draft", run_seed, 1, {}, salt))
+			if salted != _hand_ids(hand):
+				salt_varied = true
+				break
+		# 保底：第 RARE_FROM_LEVEL 关起至少一张稀有及以上
+		var has_rare := false
+		for card: Dictionary in pool.call("draft", run_seed, rare_from, {}, 0):
+			if int(card["rarity"]) > 0:
+				has_rare = true
+		if not has_rare:
+			rare_miss += 1
+		# 稀有度名称与索引对齐
+		for card: Dictionary in hand:
+			var rarity := int(card["rarity"])
+			if CardPool.rarity_name(rarity) != String(rarity_names[rarity]):
+				repeated += 1
+	_check(nondeterministic == 0,
+		"抽卡只由 (种子, 关卡, 持有, 盐) 决定，不碰全局随机（漂移 %d 次）" % nondeterministic)
+	_check(rare_miss == 0,
+		"第 %d 关起每次都至少给一张稀有及以上（缺 %d/%d）" % [rare_from, rare_miss, 20])
+	_check(repeated == 0, "每手牌张数正确、互不重复，稀有度名称与索引对齐")
+	_check(salt_varied, "盐参与抽卡运算（跳过再抽能看到不同的一手牌）")
+
+
+## 手牌 id 列表（保持顺序，用于逐项比对）。
+func _hand_ids(hand: Array) -> Array:
+	var ids: Array = []
+	for card: Dictionary in hand:
+		ids.append(String(card["id"]))
+	return ids
+
+
+## ---------- 23g. 护盾：抵消一次掉球 ----------
+func _run_p3_shield() -> void:
+	var scene: Node = await _spawn_scene()
+	await _open_run(scene, _mode("RUN"), 555)
+	scene.set("_lives", _start_lives - 1)
+	var width_before := _gf(scene.get_node("Paddle"), "paddle_width")
+	scene.call("_apply_card", CardPool.card_by_id("ward"))
+	await _wait(1)
+	_check(_gi(scene, "_shield") == 1, "「护盾」给出 1 次抵消")
+
+	var balls := _balls(scene)
+	(balls.primary().fell_out_of_playfield as Signal).emit()
+	await _wait(3)
+	_check(_gi(scene, "_shield") == 0, "掉球被护盾吃掉（剩余 %d）" % _gi(scene, "_shield"))
+	_check(_gi(scene, "_lives") == _start_lives - 1,
+		"护盾生效时不扣命（仍 %d 条）" % _gi(scene, "_lives"))
+	_check(_gi(scene, "_state") == _state_playing, "护盾生效后仍在 Playing 状态")
+	_check(absf(_gf(scene.get_node("Paddle"), "paddle_width") - width_before) < 0.01,
+		"护盾生效时挡板不收窄（护盾只挡球，不该顺手降低难度）")
+	_check(bool(balls.primary().get("attached_to_paddle")),
+		"护盾生效后主球重新吸附待发")
+	# 护盾必须真的把球救回来：球已经出界，「不扣命」本身不够，
+	# 否则玩家看到的是球凭空消失，还得再发一次。
+	_check(balls.primary().position.y < _view_height, "护盾生效后主球回到场内（%.0f）"
+		% balls.primary().position.y)
+
+	(balls.primary().fell_out_of_playfield as Signal).emit()
+	await _wait(3)
+	_check(_gi(scene, "_lives") == _start_lives - 2,
+		"护盾用尽后再掉球正常扣命（%d 条）" % _gi(scene, "_lives"))
+	_check(_gf(scene.get_node("Paddle"), "paddle_width") < width_before,
+		"真正扣命后挡板照常收窄")
+	scene.queue_free()
+	await _wait(2)
+
+
+## ---------- 23h. 「重铸」：一次性改写下一关的墙 ----------
+func _run_p3_reforge() -> void:
+	var scene: Node = await _spawn_scene()
+	await _open_run(scene, _mode("RUN"), 24680)
+	scene.call("_apply_card", CardPool.card_by_id("reforge"))
+	_check(int((scene.get("_card_mods") as Dictionary).get("reroll", 0)) == 1,
+		"「重铸」待生效标记已置位")
+
+	var reforge_seed := int(scene.call("_layout_seed"))
+	_check(reforge_seed != 0,
+		"待生效时本关种子改用一次性随机值（%d）" % reforge_seed)
+	_check(int((scene.get("_card_mods") as Dictionary).get("reroll", 0)) == 0,
+		"标记在取种子的同一次调用里被清掉（否则之后每关都会换墙）")
+	_check(int(scene.call("_layout_seed")) == 24680,
+		"下一关起恢复用本局种子（%d）" % int(scene.call("_layout_seed")))
+
+	scene.queue_free()
+	await _wait(2)
+
+
+## ---------- 23i. 每日挑战：种子、档案、连续天数 ----------
+func _run_p3_daily() -> void:
+	var gm := _game_mode()
+	if gm == null:
+		return
+	var daily := _mode("DAILY")
+	var today := int(gm.call("daily_day_index"))
+	var meta := _meta_progress()
+
+	# —— 连续天数的三条分支 ——
+	# 先删盘：record_run 是单调的，不清盘的话「档案为空」这条断言必然失败，
+	# 而后面几条又会因为盘上残留着旧值而测不出真实的分支行为。
+	_clear_meta()
+	_check(int(meta.call("daily_streak")) == 0 and int(meta.call("daily_best")) == 0,
+		"档案为空时每日最佳与连续天数都是 0")
+
+	meta.call("record_run", daily, 100, 500)
+	_check(int(meta.call("daily_best")) == 500 and int(meta.call("daily_streak")) == 1,
+		"第一次打每日挑战：记当日最佳 %d、连续 1 天"
+		% int(meta.call("daily_best")))
+
+	# 同一天再打一次：分数更低不许覆盖，连击天数也不能重复 +1
+	meta.call("record_run", daily, 100, 300)
+	_check(int(meta.call("daily_best")) == 500 and int(meta.call("daily_streak")) == 1,
+		"同日低分不覆盖当日最佳、连续天数不重复累加")
+
+	# 昨天打过 -> 连续 +1
+	_seed_meta({"daily_best": 500, "daily_day": today - 1, "daily_streak": 4})
+	meta.call("record_run", daily, 100, 600)
+	_check(int(meta.call("daily_streak")) == 5 and int(meta.call("daily_best")) == 600,
+		"隔一天续上：连续天数 4 -> %d，当日最佳刷到 600"
+		% int(meta.call("daily_streak")))
+
+	# 断档 -> 连续天数重置为 1
+	_seed_meta({"daily_day": today - 3, "daily_streak": 9})
+	meta.call("record_run", daily, 100, 700)
+	_check(int(meta.call("daily_streak")) == 1,
+		"断档三天后重新计数（连续 %d 天）" % int(meta.call("daily_streak")))
+
+	# 无尽模式记在它自己的档案里，不污染每日
+	var run_mode := _mode("RUN")
+	meta.call("record_run", run_mode, 8888, 1234)
+	_check(int(meta.call("run_best")) == 1234 and int(meta.call("daily_best")) == 700,
+		"无尽成绩写进无尽档案，不影响每日最佳")
+	meta.call("record_run", _mode_classic(), 0, 9999)
+	_check(int(meta.call("run_best")) == 1234 and int(meta.call("daily_best")) == 700,
+		"经典模式不写长期档案")
+
+	# —— 真实对局：每日种子决定整局的墙与牌 ——
+	var scene: Node = await _spawn_scene()
+	await _open_run(scene, daily)
+	var daily_seed := _gi(scene, "_seed")
+	_check(daily_seed == int(gm.call("daily_seed")),
+		"每日模式开局拿到今日种子（%d）" % daily_seed)
+	_clear_meta()
+	await _clear_current_level(scene, 1)
+	_check(_gi(scene, "_state") == _state_level_clear, "每日模式也能清关进入结算")
+	_check(int(meta.call("daily_best")) == _gi(scene, "_score"),
+		"清关即记账：当日最佳 %d == 本局分数 %d"
+		% [int(meta.call("daily_best")), _gi(scene, "_score")])
+	_check(int(meta.call("daily_streak")) == 1,
+		"清一次每日挑战把连续天数记成 1")
+	var run_info := String(scene.get_node("MenuPanel/Panel/Margin/VBox/RunInfoLabel").text)
+	_check(run_info.contains("无尽最佳"), "菜单上的无尽成绩行存在（%s）" % run_info)
+	scene.queue_free()
+	await _wait(2)
+
+
+## ---------- 23j. 抽卡面板反复发牌不堆残影 ----------
+func _run_p3_draft_panel_rebuild() -> void:
+	var scene: Node = await _spawn_scene()
+	await _open_run(scene, _mode("RUN"), 4242)
+	var panel := scene.get_node("CardDraftPanel") as CardDraftPanel
+	var cards_root := panel.get_node("Panel/Margin/VBox/Cards") as HBoxContainer
+	for round_index in 3:
+		panel.present(CardPool.draft(4242, round_index + 1, {}, round_index), round_index + 1,
+			round_index, null)
+		await _wait(2)
+	_check(cards_root.get_child_count() == CardPool.DRAFT_SIZE,
+		"连续发 3 手牌后卡面容器仍是 %d 个（不堆残影）" % cards_root.get_child_count())
+
+	# 空牌 = 自动跳过，界面不会卡住
+	var skipped := [false]
+	panel.draft_skipped.connect(func() -> void: skipped[0] = true)
+	panel.present([], 9, 0, null)
+	await _wait(2)
+	_check(skipped[0] and not panel.is_open(),
+		"发空牌（牌池见底）时面板自动跳过而不是卡在空界面")
+	panel.hide_panel()
+	scene.queue_free()
+	await _wait(2)

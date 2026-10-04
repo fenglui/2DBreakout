@@ -5,7 +5,7 @@ extends Node2D
 ## 管理分数/生命/暂停/关卡递进/通关/游戏结束、最高分存档，
 ## 以及音效、粒子碎屑、屏幕震动等手感反馈。
 
-enum State { PLAYING, PAUSED, GAME_OVER, LEVEL_CLEAR, WON }
+enum State { PLAYING, PAUSED, GAME_OVER, LEVEL_CLEAR, WON, MENU, DRAFT }
 
 const VIEW_SIZE := Vector2(480, 720)
 const WALL_THICKNESS := 14.0
@@ -117,8 +117,21 @@ const LEVEL_BALL_SPEED := [430.0, 500.0, 570.0]
 ## 挡板宽度按「已失去的生命数」收窄，是主要的难度曲线
 const PADDLE_WIDTH_STEPS := [108.0, 92.0, 76.0]
 
-## 结算态集合：只有这三种状态下「继续/重开」输入才有效
+## 结算态集合：只有这三种状态下「继续/重开」输入才有效。
+## MENU 与 DRAFT 不在其中：它们各有自己的界面与输入分支，
+## 混进来会让「按空格继续」在菜单上把当前这局直接顶掉。
 const SETTLE_STATES := [State.GAME_OVER, State.LEVEL_CLEAR, State.WON]
+
+## —— P3：卡牌加成的安全区间 ——
+## 球速倍率的钳制区间。叠满「疾风」是 1.08^n，数学上没有天花板，
+## 但倍率不封顶就能把球速推到几百——角度包络再健康也救不回来，
+## 球会退化成一发穿墙的直线弹。
+const CARD_SPEED_MUL_MIN := 0.55
+const CARD_SPEED_MUL_MAX := 1.65
+## 挡板加宽上限（像素）
+const CARD_PADDLE_BONUS_MAX := 60.0
+## 「所有砖块多挨一下」类卡牌的累计耐久上限
+const CARD_BRICK_HITS_MAX := 4
 
 @onready var bricks_root: Node2D = $Bricks
 @onready var fx_root: Node2D = $Fx
@@ -130,6 +143,8 @@ const SETTLE_STATES := [State.GAME_OVER, State.LEVEL_CLEAR, State.WON]
 @onready var hud: GameHUD = $HUD
 @onready var game_over_panel: GameOverPanel = $GameOverPanel
 @onready var pause_panel: PausePanel = $PausePanel
+@onready var menu_panel: MenuPanel = $MenuPanel
+@onready var card_draft_panel: CardDraftPanel = $CardDraftPanel
 ## 音效与震动单例（autoload），用类型化引用访问
 @onready var sfx: SfxBus = SfxBus.instance(self)
 @onready var shake: ShakeBus = ShakeBus.instance(self)
@@ -164,6 +179,31 @@ var _best_combo := 0
 ## 记时刻会让「暂停一秒」凭空吃掉一秒减速。
 var _slow_left := 0.0
 
+## —— 玩法模式与种子 ——
+## _mode 决定「有没有最后一关」与「要不要抽卡」，_seed 决定这一局的砖墙与卡序。
+## 两者在选完玩法的那一刻定死，中途不变——每日挑战的全部意义就在这里。
+var _mode := GameMode.Mode.CLASSIC
+var _seed := GameMode.CLASSIC_SEED
+## 本关的布局表：BRICK_LAYOUT 经 LevelGenerator 处理后的结果。
+## 经典模式（种子 0）下它逐位等于 BRICK_LAYOUT，所以砖墙的读取点
+## （_build_bricks / _level_legend）不需要区分模式。
+var _level_layout: Array = []
+
+## —— 卡牌 ——
+## 本局累积的加成表 {mod_key: 数值}。加法型累加、乘法型累乘，
+## 两类语义的划分由 CardPool.ADDITIVE_KEYS / MULTIPLIED_KEYS 定义，
+## 这里只负责执行，不认识任何一张具体的牌。
+var _card_mods := {}
+## 本局已选卡牌 {id: 次数}，用于上限判定与界面展示
+var _card_owned := {}
+## 本局总共选了几张
+var _card_taken := 0
+## 同一关内多次抽卡的盐。抽到「重铸」或跳过之后要能看到不同的牌，
+## 否则这两个操作就完全没有反馈。
+var _draft_salt := 0
+## 护盾剩余次数：抵消 N 次掉球
+var _shield := 0
+
 
 func _ready() -> void:
 	# 先从 user:// 下的存档读取历史最高分
@@ -194,10 +234,19 @@ func _ready() -> void:
 	game_over_panel.continue_requested.connect(_on_continue_requested)
 	game_over_panel.quit_requested.connect(_on_quit_requested)
 	pause_panel.resume_requested.connect(_on_resume_requested)
+	pause_panel.menu_requested.connect(_on_menu_requested)
 	pause_panel.quit_requested.connect(_on_quit_requested)
+	menu_panel.mode_chosen.connect(_on_mode_chosen)
+	menu_panel.quit_requested.connect(_on_quit_requested)
+	card_draft_panel.card_chosen.connect(_on_card_chosen)
+	card_draft_panel.draft_skipped.connect(_on_draft_skipped)
 
 	_configure_playfield()
 	_start_new_game()
+	# 启动后先落在玩法菜单上：经典 / 无尽 / 每日是三种结构完全不同的局，
+	# 让玩家在开局前选，而不是打完三关才发现还有别的玩法。
+	# _start_new_game() 已经建好第 1 关的墙，所以菜单背后不是空白，而是马上要打的那一局。
+	_open_menu()
 
 
 ## 依据墙体位置计算挡板活动范围与球的吸附/出界高度。
@@ -215,8 +264,11 @@ func _configure_playfield() -> void:
 
 ## 运行时按行按列生成砖块，耐久与球速按当前关卡取值。
 ## 砖色取自当前关卡调色板；调色板行色数量与 BRICK_ROWS 不一致时按取模循环。
-## 特殊砖按 BRICK_LAYOUT 就地替换普通砖（砖块总数不变，因此 BRICK_TOTAL
-## 与「已清除计数达标即通关」这条判定都不用改）。
+## 布局取自 _level_layout（BRICK_LAYOUT 经 LevelGenerator 按本局种子处理后的结果）：
+## 特殊砖是就地替换普通砖，砖块总数不变，因此 BRICK_TOTAL
+## 与「已清除计数达标即通关」这条判定都不用改。
+## 分数与耐久再乘/加上卡牌加成——加成是建墙时写进砖块属性的，
+## 不是每次命中时现算，因此「本关中途改加成」这种操作根本不存在。
 func _build_bricks() -> void:
 	for old_brick in bricks_root.get_children():
 		old_brick.queue_free()
@@ -226,20 +278,22 @@ func _build_bricks() -> void:
 	var base_hits: int = LEVEL_BRICK_HITS[(_level - 1) % LEVEL_BRICK_HITS.size()]
 	var palette := current_palette()
 	var row_colors: Array = palette.row_colors if palette != null else ROW_COLORS
+	var score_mult := _card_score_mult()
+	var extra_hits := _card_brick_hits_add()
+	var armor_extra := ARMOR_EXTRA_HITS + _card_armor_add()
 
 	for row in BRICK_ROWS:
 		var row_color: Color = row_colors[row % row_colors.size()]
 		for column in BRICK_COLUMNS:
-			var kind: int = BRICK_LAYOUT[row][column]
+			var kind: int = int(_level_layout[row][column])
 			var brick := Brick.new()
 			brick.size = BRICK_SIZE
 			brick.kind = kind
-			brick.points = POINTS_PER_BRICK * int(KIND_POINTS_MULT[kind])
+			brick.points = POINTS_PER_BRICK * int(KIND_POINTS_MULT[kind]) * score_mult
 			brick.color = row_color
 			# 只有加固砖额外加耐久；其余特殊砖沿用本关标准，
 			# 免得「特殊砖更难打」与「难度曲线由 LEVEL_BRICK_HITS 决定」两条规则打架。
-			brick.max_hits = base_hits + ARMOR_EXTRA_HITS if kind == Brick.Kind.ARMORED \
-				else base_hits
+			brick.max_hits = base_hits + extra_hits + (armor_extra if kind == Brick.Kind.ARMORED else 0)
 			brick.hits_left = brick.max_hits
 			brick.position = Vector2(
 				start_x + column * (BRICK_SIZE.x + BRICK_GAP) + BRICK_SIZE.x * 0.5,
@@ -253,7 +307,7 @@ func _build_bricks() -> void:
 ## 拿「还剩什么砖」去反推本关有什么砖，最后一行永远是空的。
 func _level_legend() -> String:
 	var names: Array[String] = []
-	for row in BRICK_LAYOUT:
+	for row in _level_layout:
 		for kind: int in row:
 			if kind == Brick.Kind.NORMAL:
 				continue
@@ -311,7 +365,18 @@ func _start_new_game() -> void:
 	_level = 1
 	_combo_total = 0
 	_best_combo = 0
+	_reset_cards()
 	_start_level()
+
+
+## 清空全部卡牌状态。卡牌是「本局内」的成长：跨局继承会让第二局一开始
+## 就没牌可抽（owned 已经全部顶到 max_stack），复玩性反而归零。
+func _reset_cards() -> void:
+	_card_mods = {}
+	_card_owned = {}
+	_card_taken = 0
+	_draft_salt = 0
+	_shield = 0
 
 
 ## 开新一关：保留分数与生命，重建砖墙、套用本关球速、挡板宽度与配色。
@@ -322,7 +387,9 @@ func _start_level() -> void:
 	_reset_charge()
 	_reset_combo()
 	_slow_left = 0.0
+	_level_layout = LevelGenerator.generate(_layout_seed(), _level, BRICK_LAYOUT)
 	balls.ball_speed = LEVEL_BALL_SPEED[(_level - 1) % LEVEL_BALL_SPEED.size()]
+	balls.max_balls_cap = _card_max_balls()
 	_build_bricks()
 	_apply_paddle_width()
 	_apply_palette()
@@ -337,21 +404,216 @@ func _start_level() -> void:
 	hud.set_hint(_launch_hint())
 
 
+## 本关砖墙生成用的种子。
+##
+## 经典模式恒为 0 —— 0 是 LevelGenerator 的「原样返回模板」开关，
+## 于是经典模式的砖墙逐位等于 BRICK_LAYOUT，新系统对老玩法完全透明。
+## 抽到「重铸」时改用一次性随机种子，并**在这里就地清掉标记**：
+## 否则它会在之后每一关各触发一次，一张牌换来了整局换墙。
+func _layout_seed() -> int:
+	if _mode == GameMode.Mode.CLASSIC:
+		return GameMode.CLASSIC_SEED
+	if int(_card_mods.get("reroll", 0)) > 0:
+		_card_mods["reroll"] = 0
+		return GameMode.random_seed()
+	return _seed
+
+
 ## 吸附等待发射时的统一提示文本（关卡推进后由传感器回调覆盖，两处必须一致）。
 func _launch_hint() -> String:
 	return "按住 空格 蓄力，松开发射（第 %d 关 · 剩余生命 %d）" % [_level, _lives]
 
 
 ## 挡板宽度随已失去的生命收窄，并同步重算可活动范围。
+## 卡牌加宽是叠加在阶梯之上的偏置而不是改写阶梯本身：
+## 直接把某一级替换成加宽值，「已失去 N 条命」这条难度曲线就断了。
 func _apply_paddle_width() -> void:
 	var lost := clampi(START_LIVES - _lives, 0, PADDLE_WIDTH_STEPS.size() - 1)
-	paddle.set_width(PADDLE_WIDTH_STEPS[lost])
+	paddle.set_width(PADDLE_WIDTH_STEPS[lost] + _card_paddle_bonus())
 	paddle.left_bound = WALL_THICKNESS + paddle.paddle_width * 0.5
 	paddle.right_bound = VIEW_SIZE.x - WALL_THICKNESS - paddle.paddle_width * 0.5
 	paddle.global_position.x = clampf(paddle.global_position.x, paddle.left_bound, paddle.right_bound)
 
 
+## 打开玩法菜单。菜单背后保留着已经建好的第 1 关墙，球仍吸附在挡板上。
+## 这里刻意**不**把墙清掉：玩家在菜单上就该先看见这局长什么样，
+## 而不是点完按钮之后从一片空白开始。
+func _open_menu() -> void:
+	_state = State.MENU
+	menu_panel.present()
+	# 菜单期间挡板不可操控：否则玩家在菜单上顺手按方向键，
+	# 背景里的挡板就跟着滑走了，看起来像菜单把游戏操控弄坏了。
+	paddle.input_enabled = false
+	hud.set_hint("选择玩法开始")
+
+
+## 以指定模式开一局。
+##
+## run_seed < 0 表示按模式自动分配（经典恒为 0、每日按当天日期、无尽随机）；
+## 传 0 以上则强制沿用该种子，用于「这副牌再来一次」的重开诉求。
+func _begin_run(mode: int, run_seed: int = -1) -> void:
+	_mode = mode
+	_seed = GameMode.begin_seed(mode) if run_seed < 0 else GameMode.seed_for_mode(mode, run_seed)
+	menu_panel.hide_menu()
+	card_draft_panel.hide_panel()
+	_start_new_game()
+
+
+func _on_mode_chosen(mode: int) -> void:
+	# 只在菜单态接受：面板是常驻节点，隐藏时理论上收不到按钮点击，
+	# 但同一帧内「点模式」与「结算面板收起」先后到达的情况完全可能发生。
+	if _state != State.MENU:
+		return
+	_begin_run(mode)
+
+
+## 发一手三选一。
+## 牌池见底（所有牌都叠到 max_stack）时 CardDraftPanel 会直接发 draft_skipped，
+## 于是「没牌可发」不需要在这里再判一次，也就不会出现卡住的死界面。
+func _open_draft() -> void:
+	_state = State.DRAFT
+	var cards := CardPool.draft(_seed, _level, _card_owned, _draft_salt)
+	card_draft_panel.present(cards, _level, _card_taken, current_palette())
+	hud.set_hint("选择一张卡牌带进下一关")
+
+
+func _on_card_chosen(index: int) -> void:
+	if _state != State.DRAFT:
+		return
+	var cards: Array = card_draft_panel.offered
+	if index < 0 or index >= cards.size():
+		return
+	_apply_card(cards[index])
+	card_draft_panel.hide_panel()
+	_advance_after_draft()
+
+
+func _on_draft_skipped() -> void:
+	if _state != State.DRAFT:
+		return
+	card_draft_panel.hide_panel()
+	_advance_after_draft()
+
+
+## 离开抽卡界面并进入下一关。
+## 「选牌」与「跳过」两条出口共用它，保证换关副作用只有一个实现——
+## 分开写两遍的话，跳过路径迟早会漏掉清副球或重置连击。
+func _advance_after_draft() -> void:
+	_level += 1
+	_start_level()
+
+
+## 把一张卡的加成并入本局。
+##
+## 加法型累加、乘法型累乘，划分标准来自 CardPool 的两张白名单而不是卡面自带标志：
+## 白名单是「这张游戏认识哪些 mod 键」的唯一事实来源，
+## 卡面出现白名单之外的键就是数据写错了（冒烟测试有一条断言专门守这个）。
+## 两类之外的键（extra_lives / reroll）是当场结算的即时效果，不进累积表——
+## 累加起来会让「加 2 命」被反复执行。
+func _apply_card(card: Dictionary) -> void:
+	if card.is_empty():
+		return
+	var card_id := String(card["id"])
+	_card_owned[card_id] = int(_card_owned.get(card_id, 0)) + 1
+	_card_taken += 1
+	for key: String in (card["mods"] as Dictionary):
+		var value: Variant = (card["mods"] as Dictionary)[key]
+		if CardPool.is_multiplied(key):
+			_card_mods[key] = float(_card_mods.get(key, 1.0)) * float(value)
+		elif CardPool.is_additive(key):
+			_card_mods[key] = float(_card_mods.get(key, 0.0)) + float(value)
+		else:
+			match key:
+				"extra_lives":
+					_lives = mini(_lives + int(value), _max_lives())
+				"reroll":
+					_card_mods["reroll"] = int(_card_mods.get("reroll", 0)) + int(value)
+				_:
+					push_error("未知的卡牌加成键「%s」（卡 %s）" % [key, card_id])
+	# 护盾是「次数」而不是「属性」：它要在 _on_last_ball_lost 里逐次消耗，
+	# 所以 _card_mods 里的累计值必须同步成运行期计数，否则抽到卡却看不到效果。
+	_shield = int(_card_mods.get("shield", 0.0))
+	_play_sfx("powerup")
+	MetaProgress.record_card(card_id)
+	_update_hud()
+
+
+# —— 卡牌加成的读取 ——
+# 全部从 _card_mods 这一个字典取，游戏逻辑只关心「加了多少」而不关心「是哪张牌」，
+# 所以加一张新卡不需要在这里补一行分支。
+
+
+## 每块砖的分数倍率。
+## 刻意是整数（CardPool.MULTIPLIED_KEYS 的约定）：
+## 冒烟测试有一条「总分始终是每块砖分值的整数倍」的不变量断言，
+## 非整数倍率会直接打破它。
+func _card_score_mult() -> int:
+	return maxi(1, int(_card_mods.get("score_mult", 1.0)))
+
+
+func _card_combo_mult() -> int:
+	return maxi(1, int(_card_mods.get("combo_mult", 1.0)))
+
+
+func _card_speed_mul() -> float:
+	return clampf(float(_card_mods.get("speed_mul", 1.0)),
+		CARD_SPEED_MUL_MIN, CARD_SPEED_MUL_MAX)
+
+
+func _card_paddle_bonus() -> float:
+	return clampf(float(_card_mods.get("paddle_bonus", 0.0)), 0.0, CARD_PADDLE_BONUS_MAX)
+
+
+func _card_brick_hits_add() -> int:
+	return clampi(int(_card_mods.get("brick_hits", 0.0)), 0, CARD_BRICK_HITS_MAX)
+
+
+func _card_armor_add() -> int:
+	return maxi(0, int(_card_mods.get("armor_add", 0.0)))
+
+
+func _card_blast_radius() -> float:
+	return BLAST_RADIUS + maxf(0.0, float(_card_mods.get("blast_add", 0.0)))
+
+
+func _card_slow_seconds() -> float:
+	return maxf(0.5, SLOW_SECONDS + float(_card_mods.get("slow_add", 0.0)))
+
+
+## 减速倍率（越大越慢）。
+## 「速融」往正方向加而不是做减法：SLOW_SPEED_SCALE 是「慢多少」的刻度，
+## 减法写法在数值写错时会得到 0（球全速）或负数（球倒飞），
+## 加法写法最坏也只是「减速不明显」这种无害的退化。
+func _card_slow_scale() -> float:
+	return clampf(SLOW_SPEED_SCALE + float(_card_mods.get("slow_scale_add", 0.0)), 0.2, 1.0)
+
+
+func _card_split_spread_deg() -> float:
+	return maxf(0.0, SPLIT_SPREAD_DEG + float(_card_mods.get("split_deg_add", 0.0)))
+
+
+func _card_max_balls() -> int:
+	return BallManager.MAX_BALLS + maxi(0, int(_card_mods.get("max_balls_add", 0.0)))
+
+
+## 生命上限。「生命之泉」抬的是上限而不是 START_LIVES：
+## 直接抬高开局血量等于让生命系统整局失效，那不是一张有取舍的卡。
+func _max_lives() -> int:
+	return MAX_LIVES + maxi(0, int(_card_mods.get("max_lives_add", 0.0)))
+
+
 func _unhandled_input(event: InputEvent) -> void:
+	# MENU / DRAFT 各有自己的界面与输入分支，先在这里整段截走。
+	# 不截的话下面按 _state 排的那串判断会把菜单上的空格当成「发射」或「继续」。
+	if _state == State.MENU:
+		if event.is_action_pressed("launch") or event.is_action_pressed("restart"):
+			_begin_run(GameMode.Mode.CLASSIC)
+			get_viewport().set_input_as_handled()
+		return
+	if _state == State.DRAFT:
+		_handle_draft_input(event)
+		return
+
 	if event.is_action_pressed("pause"):
 		if _state == State.PLAYING:
 			_set_paused(true)
@@ -371,6 +633,35 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.is_action_released("launch") and _charging:
 			_release_charge()
 			get_viewport().set_input_as_handled()
+
+
+## 抽卡界面的键盘操作：1 / 2 / 3 选牌，R 跳过。
+##
+## 这几个键刻意**不**进 project.godot 的 InputMap：它们只在抽卡这一个界面里有意义，
+## 塞进全局动作表等于给「移动 / 发射 / 暂停」旁边平白多出一条任何时候都无效的规则。
+##
+## 回车/空格留给获得焦点的「选择」按钮（面板 present() 时会 grab_focus 第一张），
+## 所以这里不重复处理 ui_accept —— 两条路径同时响应的话一次按键会选两次。
+func _handle_draft_input(event: InputEvent) -> void:
+	if event.is_action_pressed("restart"):
+		_on_draft_skipped()
+		get_viewport().set_input_as_handled()
+		return
+	if not (event is InputEventKey) or not event.pressed or event.echo:
+		return
+	var key := (event as InputEventKey).keycode
+	var slot := -1
+	match key:
+		KEY_1, KEY_KP_1:
+			slot = 0
+		KEY_2, KEY_KP_2:
+			slot = 1
+		KEY_3, KEY_KP_3:
+			slot = 2
+	if slot < 0:
+		return
+	card_draft_panel.choose(slot)
+	get_viewport().set_input_as_handled()
 
 
 ## 蓄力与发射：按住 launch 累积蓄力，松开时按蓄力强度决定发射角与球速。
@@ -404,7 +695,7 @@ func _release_charge() -> void:
 	# 所以抬速度不会改变角度包络，MAX_CHARGE_TILT 才是发射角的唯一来源。
 	var launched := balls.primary()
 	launched.speed = LEVEL_BALL_SPEED[(_level - 1) % LEVEL_BALL_SPEED.size()] \
-		* lerpf(1.0, CHARGE_SPEED_MUL, power)
+		* lerpf(1.0, CHARGE_SPEED_MUL, power) * _card_speed_mul()
 	launched.launch(direction)
 	_play_sfx("launch")
 	_add_shake(0.06 + power * 0.06)
@@ -521,7 +812,17 @@ func _register_break(_brick: Brick) -> void:
 ## 计数会一直停在 2 之上，只查子节点数就会漏判。
 func _check_level_cleared() -> void:
 	if _bricks_cleared >= BRICK_TOTAL:
-		_settle(State.LEVEL_CLEAR if _level < MAX_LEVEL else State.WON)
+		_settle(_level_clear_state())
+
+
+## 清空砖墙后进入的结算态。无尽模式没有最后一关，永远是 LEVEL_CLEAR；
+## 经典模式打满最后一关才是 WON。
+## 两处调用点（_check_level_cleared 与 _blast 的连锁复查）都必须走这个函数：
+## 分开写就会出现「最后一击是爆破连锁时判成了 WON，而正常打碎时判成了 LEVEL_CLEAR」。
+func _level_clear_state() -> int:
+	if GameMode.is_endless(_mode) or _level < MAX_LEVEL:
+		return State.LEVEL_CLEAR
+	return State.WON
 
 
 ## 特殊砖的「击破时效果」。
@@ -540,10 +841,10 @@ func _apply_special(brick: Brick, ball: Ball) -> void:
 			_slow_balls()
 
 
-## 生命砖：生命 +1，但不超过 MAX_LIVES。
+## 生命砖：生命 +1，但不超过生命上限（卡牌可以抬高上限）。
 ## 满了也要给分给连击——不给反馈的话玩家会以为砖是坏的。
 func _grant_life() -> void:
-	_lives = mini(_lives + 1, MAX_LIVES)
+	_lives = mini(_lives + 1, _max_lives())
 	_play_sfx("powerup")
 	_add_shake(0.2)
 	_update_hud()
@@ -561,6 +862,9 @@ func _blast(center: Brick) -> void:
 	var pending: Array[Brick] = [center]
 	var visited := {}
 	var origin_color := center.color
+	# 半径只在开头取一次：整段连锁共用同一个值，
+	# 中途重读的话卡牌面板开着也不会变，但函数会看起来像是随时可改。
+	var radius := _card_blast_radius()
 	_spawn_wave(center.global_position, origin_color)
 	_play_sfx("boom")
 	_add_shake(0.42)
@@ -578,7 +882,7 @@ func _blast(center: Brick) -> void:
 				continue
 			if visited.has(neighbor.get_instance_id()):
 				continue
-			if neighbor.global_position.distance_to(epicenter.global_position) > BLAST_RADIUS:
+			if neighbor.global_position.distance_to(epicenter.global_position) > radius:
 				continue
 			visited[neighbor.get_instance_id()] = true
 			_score += neighbor.hit()
@@ -589,7 +893,7 @@ func _blast(center: Brick) -> void:
 		# 通关判定必须在连锁过程中随时复查：连锁把最后几块砖清掉时
 		# 场上的球已经被 _settle() 冻结，剩下的波及就不该再改分数了。
 		if _bricks_cleared >= BRICK_TOTAL:
-			_settle(State.LEVEL_CLEAR if _level < MAX_LEVEL else State.WON)
+			_settle(_level_clear_state())
 			return
 	_update_hud()
 
@@ -602,7 +906,7 @@ func _split_ball(brick: Brick, ball: Ball) -> void:
 	var heading := Vector2.DOWN
 	if is_instance_valid(ball) and ball.velocity.length_squared() > 0.01:
 		heading = ball.velocity.normalized()
-	var direction := heading.rotated(deg_to_rad(SPLIT_SPREAD_DEG))
+	var direction := heading.rotated(deg_to_rad(_card_split_spread_deg()))
 	var spawn_at := brick.global_position + Vector2(0.0, brick.size.y * 0.5 + 6.0)
 	if balls.spawn_extra(spawn_at, direction) == null:
 		return
@@ -610,13 +914,13 @@ func _split_ball(brick: Brick, ball: Ball) -> void:
 	_add_shake(0.18)
 
 
-## 减速砖：全场球速打折 SLOW_SECONDS 秒。
+## 减速砖：全场球速打折若干秒（时长与倍率都可能被卡牌改过）。
 func _slow_balls() -> void:
-	_slow_left = SLOW_SECONDS
-	balls.apply_speed_scale(SLOW_SPEED_SCALE)
+	_slow_left = _card_slow_seconds()
+	balls.apply_speed_scale(_card_slow_scale())
 	_play_sfx("slow")
 	_add_shake(0.12)
-	hud.set_hint("减速 %.1f 秒" % SLOW_SECONDS)
+	hud.set_hint("减速 %.1f 秒" % _slow_left)
 
 
 ## 连击奖励公式（纯函数）。
@@ -639,7 +943,7 @@ func _bank_combo() -> int:
 	if _combo <= 0:
 		_reset_combo()
 		return 0
-	var bonus := combo_bonus_for(_combo)
+	var bonus := combo_bonus_for(_combo) * _card_combo_mult()
 	if bonus > 0:
 		_score += bonus
 		_combo_total += 1
@@ -689,6 +993,17 @@ func _on_paddle_hit(_ball: Ball) -> void:
 func _on_last_ball_lost() -> void:
 	# 结算/暂停状态下不再扣命，避免球被重新吸附、盖掉结算面板
 	if _state != State.PLAYING:
+		return
+	# 护盾优先：抵消掉这一次掉球，生命、连击与挡板宽度都不动。
+	# 必须放在扣命之前，否则会出现「护盾挡下了球，命还是照扣」这种自相矛盾的结果。
+	if _shield > 0:
+		_shield -= 1
+		_play_sfx("powerup")
+		_add_shake(0.4)
+		_reset_combo()
+		balls.stick_primary()
+		_update_hud()
+		hud.set_hint("护盾挡下一次掉球（剩余 %d）" % _shield)
 		return
 	_lives -= 1
 	_play_sfx("life")
@@ -759,14 +1074,20 @@ func _settle(final_state: int) -> void:
 		_bank_combo()
 
 	var is_new_best := _save_best()
+	# 无尽/每日模式把成绩记进长期档案（当日最佳、连续打卡天数、上局种子）。
+	# 经典模式不记：它的分数已经被最高分存档覆盖，再记一份只会让档案条数膨胀。
+	if GameMode.tracks_progress(_mode):
+		MetaProgress.record_run(_mode, _seed, _score)
 	# _save_best() 可能把 _best 顶上去，所以 HUD 要在它之后再刷一次
 	_update_hud()
 
+	var card_step := GameMode.has_cards(_mode)
 	match final_state:
 		State.LEVEL_CLEAR:
 			_play_sfx("clear")
 			_add_shake(0.5)
-			hud.set_hint("第 %d 关通过！按 空格 / R 进入下一关" % _level)
+			hud.set_hint("第 %d 关通过！按 空格 / R %s"
+				% [_level, "抽一张卡牌" if card_step else "进入下一关"])
 		State.WON:
 			_play_sfx("win")
 			_add_shake(0.9)
@@ -776,8 +1097,12 @@ func _settle(final_state: int) -> void:
 			_add_shake(0.8)
 			hud.set_hint("按 空格 / R 重开")
 
+	var continue_text := ""
+	if final_state == State.LEVEL_CLEAR:
+		continue_text = "抽卡牌" if card_step else "下一关"
 	game_over_panel.show_result(_score, _best, is_new_best, final_state, _level,
-		_best_combo, _combo_total, current_palette(), "特殊砖 " + _level_legend())
+		_best_combo, _combo_total, current_palette(), "特殊砖 " + _level_legend(),
+		continue_text)
 
 
 ## 破纪录则写入 user:// 存档，返回是否刷新纪录。
@@ -794,7 +1119,8 @@ func _save_best() -> bool:
 	return is_new_best
 
 
-## 结算面板的“继续”：关卡通过则推进到下一关，否则整局重开。
+## 结算面板的“继续”：关卡通过则推进到下一关（无尽模式先进抽卡界面），
+## 否则整局重开。
 ## 只有结算态才接受该请求：按钮点击走 _gui_input、键盘走 _unhandled_input，
 ## 同一帧内两路先后到达时若不守状态，推进完第 2 关会立刻被第二次调用整局清零。
 func _on_continue_requested() -> void:
@@ -803,21 +1129,44 @@ func _on_continue_requested() -> void:
 
 	if _state == State.LEVEL_CLEAR:
 		_restarting = true
-		_level += 1
-		game_over_panel.hide_result()
-		_start_level()
+		if GameMode.has_cards(_mode):
+			game_over_panel.hide_result()
+			_open_draft()
+		else:
+			_level += 1
+			game_over_panel.hide_result()
+			_start_level()
 		_restarting = false
 		return
 
 	_restarting = true
 	get_tree().paused = false
 	_reset_shake()
+	if GameMode.is_endless(_mode):
+		# 「这副牌再来一次」：沿用当前模式与种子重开，而不是整场景重载
+		# （重载会把模式打回经典，每日挑战与无尽就再也回不去了）。
+		# 结算面板只是被 _begin_run 顺带收起，不走 reload 的副作用。
+		_begin_run(_mode, _seed)
+		_restarting = false
+		return
 	get_tree().reload_current_scene()
 
 
 func _on_resume_requested() -> void:
 	if _state == State.PAUSED:
 		_set_paused(false)
+
+
+## 暂停面板上的「换个玩法」：直接回玩法菜单，让玩家重新选模式。
+##
+## 不用 _begin_run 重开当前局——这条路的语义是「换」，不是在原地续命：
+## 玩家的本意通常是「这局没戏了，换每日挑战试试」，
+## 若把他送回同一模式同一种子，他会以为按钮坏了。
+func _on_menu_requested() -> void:
+	get_tree().paused = false
+	pause_panel.set_paused(false)
+	_reset_shake()
+	_open_menu()
 
 
 func _on_quit_requested() -> void:
@@ -829,11 +1178,23 @@ func _on_quit_requested() -> void:
 func _update_hud() -> void:
 	hud.set_score(_score, _best)
 	hud.set_lives(_lives)
-	hud.set_level(_level, MAX_LEVEL)
+	# 无尽模式没有最后一关，max_level 传 0 让 HUD 走「第 N 关」的单数写法；
+	# 硬塞 MAX_LEVEL 会让玩家在第 40 关看到「第 40 / 3 关」。
+	hud.set_level(_level, 0 if GameMode.is_endless(_mode) else MAX_LEVEL)
 	# 连击达到阈值才在 HUD 上显示：1 连击每次都在闪，纯粹是噪音
 	hud.set_combo(_combo if _combo >= COMBO_HIGHLIGHT else 0)
 	# 球数只在 >1 时显示：单球是常态，一直占着 HUD 只会让特殊状态不显眼
 	hud.set_balls(balls.count())
+	hud.set_mode(_mode_label())
+
+
+## HUD 上的玩法徽标（模式名 + 种子码）。经典模式返回空串即不显示：
+## 三关固定砖墙本来就在每个人的记忆里，多这一行只是噪音；
+## 而无尽/每日必须常驻——玩家被打断之后回来，靠它才知道自己玩的是哪一局。
+func _mode_label() -> String:
+	if _mode == GameMode.Mode.CLASSIC:
+		return ""
+	return "%s · %s" % [GameMode.mode_name(_mode), GameMode.seed_text(_seed)]
 
 
 ## 物理帧里累积拖尾采样并推进减速倒计时。放在 _physics_process 而不是 _process：

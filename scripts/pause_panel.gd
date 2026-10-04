@@ -1,13 +1,16 @@
 class_name PausePanel
 extends CanvasLayer
-## 暂停遮罩：按 P 键切换，显示“已暂停”，并提供继续与退出按钮。
+## 暂停遮罩：按 P 键切换，显示“已暂停”，并提供继续、换玩法与退出按钮。
 ## 面板始终处理输入，因此暂停状态下按钮依然可点。
 
 signal resume_requested()
 signal quit_requested()
+## 「换个玩法」：放弃当前这局，回玩法菜单重新选模式。
+signal menu_requested()
 
 @onready var panel: PanelContainer = $Panel
 @onready var resume_button: Button = $Panel/Margin/VBox/ResumeButton
+@onready var menu_button: Button = $Panel/Margin/VBox/MenuButton
 @onready var quit_button: Button = $Panel/Margin/VBox/QuitButton
 @onready var sfx: SfxBus = SfxBus.instance(self)
 
@@ -16,6 +19,7 @@ func _ready() -> void:
 	# 暂停时依然要能显示/隐藏并响应按钮，所以始终处理输入
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	resume_button.pressed.connect(_on_resume_pressed)
+	menu_button.pressed.connect(_on_menu_pressed)
 	quit_button.pressed.connect(_on_quit_pressed)
 	panel.visible = false
 
@@ -30,6 +34,12 @@ func _on_resume_pressed() -> void:
 	if sfx != null:
 		sfx.play("ui")
 	resume_requested.emit()
+
+
+func _on_menu_pressed() -> void:
+	if sfx != null:
+		sfx.play("ui")
+	menu_requested.emit()
 
 
 func _on_quit_pressed() -> void:

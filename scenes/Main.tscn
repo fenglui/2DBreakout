@@ -1,4 +1,4 @@
-[gd_scene load_steps=16 format=3]
+[gd_scene load_steps=18 format=3]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/paddle.gd" id="2_paddle"]
@@ -11,6 +11,8 @@
 [ext_resource type="Resource" path="res://scripts/palette_space.tres" id="9_pal_space"]
 [ext_resource type="Resource" path="res://scripts/palette_violet.tres" id="10_pal_violet"]
 [ext_resource type="Resource" path="res://scripts/palette_lava.tres" id="11_pal_lava"]
+[ext_resource type="PackedScene" path="res://scenes/MenuPanel.tscn" id="12_menu"]
+[ext_resource type="PackedScene" path="res://scenes/CardDraftPanel.tscn" id="13_draft"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_wall_vertical"]
 size = Vector2(14, 780)
@@ -196,6 +198,19 @@ text = "按住 空格 蓄力，松开发射"
 horizontal_alignment = 1
 vertical_alignment = 1
 
+[node name="ModeLabel" type="Label" parent="HUD"]
+visible = false
+offset_left = 16.0
+offset_top = 86.0
+offset_right = 464.0
+offset_bottom = 106.0
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 13
+text = "无尽挑战 · ABCDEF"
+horizontal_alignment = 1
+vertical_alignment = 1
+
 [node name="GameOverPanel" type="CanvasLayer" parent="."]
 script = ExtResource("5_gameover")
 
@@ -272,9 +287,9 @@ script = ExtResource("6_pause")
 [node name="Panel" type="PanelContainer" parent="PausePanel"]
 visible = false
 offset_left = 140.0
-offset_top = 280.0
+offset_top = 252.0
 offset_right = 340.0
-offset_bottom = 440.0
+offset_bottom = 468.0
 
 [node name="Margin" type="MarginContainer" parent="PausePanel/Panel"]
 layout_mode = 2
@@ -297,6 +312,15 @@ horizontal_alignment = 1
 layout_mode = 2
 text = "继续"
 
+[node name="MenuButton" type="Button" parent="PausePanel/Panel/Margin/VBox"]
+layout_mode = 2
+tooltip_text = "放弃当前这局，回到玩法菜单重新选一个"
+text = "换个玩法"
+
 [node name="QuitButton" type="Button" parent="PausePanel/Panel/Margin/VBox"]
 layout_mode = 2
 text = "退出游戏"
+
+[node name="MenuPanel" parent="." instance=ExtResource("12_menu")]
+
+[node name="CardDraftPanel" parent="." instance=ExtResource("13_draft")]

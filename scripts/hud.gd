@@ -11,6 +11,7 @@ const COMBO_POP_RISE := 26.0
 @onready var lives_label: Label = $LivesLabel
 @onready var level_label: Label = $LevelLabel
 @onready var balls_label: Label = $BallsLabel
+@onready var mode_label: Label = $ModeLabel
 @onready var hint_label: Label = $HintLabel
 @onready var combo_label: Label = $ComboLabel
 @onready var combo_pop: Label = $ComboPop
@@ -29,6 +30,7 @@ func _ready() -> void:
 	combo_pop.visible = false
 	combo_label.visible = false
 	balls_label.visible = false
+	mode_label.visible = false
 
 
 func set_score(score: int, best_score: int) -> void:
@@ -40,8 +42,12 @@ func set_lives(lives: int) -> void:
 	lives_label.text = "生命 %d" % lives
 
 
+## max_level 传 0 表示「没有最后一关」（无尽模式），走「第 N 关」的单数写法。
 func set_level(level: int, max_level: int) -> void:
-	level_label.text = "第 %d / %d 关" % [level, max_level]
+	if max_level <= 0:
+		level_label.text = "第 %d 关" % level
+	else:
+		level_label.text = "第 %d / %d 关" % [level, max_level]
 
 
 ## 场上球数。多球下「现在到底有几颗球在飞」是玩家必须随时知道的信息：
@@ -56,6 +62,16 @@ func set_balls(count: int) -> void:
 
 func set_hint(text: String) -> void:
 	hint_label.text = text
+
+
+## 当前玩法与种子（经典模式下 Main 传空串，等于不显示）。
+##
+## 种子必须在 HUD 上常驻而不是只在菜单里看一眼：无尽与每日都是「这副牌我能
+## 复现」才成立的玩法，玩家中途被打断（切窗口、退出）之后回来靠这行字
+## 才知道自己玩的是哪一局。
+func set_mode(text: String) -> void:
+	mode_label.visible = not text.is_empty()
+	mode_label.text = text
 
 
 ## combo 为 0 时隐藏连击标签，否则显示当前连击数。
@@ -80,7 +96,7 @@ func set_accent(accent: Color) -> void:
 func set_text_colors(primary: Color, secondary: Color) -> void:
 	for label in [score_label, lives_label, level_label, balls_label, combo_label]:
 		(label as Label).add_theme_color_override("font_color", primary)
-	for label in [best_label, hint_label]:
+	for label in [best_label, hint_label, mode_label]:
 		(label as Label).add_theme_color_override("font_color", secondary)
 
 

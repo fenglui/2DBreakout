@@ -1,0 +1,54 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/card_draft_panel.gd" id="1_draft"]
+
+[node name="CardDraftPanel" type="CanvasLayer"]
+script = ExtResource("1_draft")
+
+[node name="Panel" type="PanelContainer" parent="."]
+visible = false
+offset_left = 20.0
+offset_top = 226.0
+offset_right = 460.0
+offset_bottom = 494.0
+
+[node name="Margin" type="MarginContainer" parent="Panel"]
+layout_mode = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 16
+
+[node name="VBox" type="VBoxContainer" parent="Panel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="TitleLabel" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 26
+text = "选择一张卡牌"
+horizontal_alignment = 1
+
+[node name="SubLabel" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 14
+text = "第 1 关通过 · 本局已选 0 张"
+horizontal_alignment = 1
+
+[node name="Cards" type="HBoxContainer" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 10
+alignment = 1
+
+[node name="SkipButton" type="Button" parent="Panel/Margin/VBox"]
+layout_mode = 2
+text = "跳过"
+
+[node name="HintLabel" type="Label" parent="Panel/Margin/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.788235, 0.85098, 0.921569, 1)
+theme_override_font_sizes/font_size = 13
+text = "按 1 / 2 / 3 选择，按 R 跳过"
+horizontal_alignment = 1
+autowrap_mode = 2

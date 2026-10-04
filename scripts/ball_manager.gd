@@ -14,6 +14,10 @@ extends Node2D
 
 ## 同屏球数上限（含主球）。场上球越多，物理碰撞与画面可读性都越差，
 ## 不设上限的话一整屏白点乱窜，反而更难玩。
+##
+## 这是**默认值**而不是硬上限：卡牌「蜂群」要能把它调高，
+## 所以真正参与判定的是下面的 max_balls_cap 字段。留常量是为了让
+## 「未经任何加成时的上限」有唯一权威来源，冒烟测试也按它铺满球数。
 const MAX_BALLS := 8
 
 ## 单颗球掉出场地之外的任何碰撞（球自身发信号，这里转成「哪颗球 + 发生了什么」）
@@ -35,6 +39,9 @@ var ball_color := Color("f8f9fa")
 ## 当前速度倍率（减速砖写入）。存一份权威值，新生成的球也按它出场，
 ## 否则「减速期间分裂出来的球」会以全速出现，规则立刻自相矛盾。
 var speed_scale := 1.0
+## 当前生效的同屏球数上限。换关时由 Main 按卡牌加成重新写入，
+## 因此它必须是字段而不是到处直接读 MAX_BALLS 常量。
+var max_balls_cap := MAX_BALLS
 
 var _paddle: Node2D = null
 var _primary: Ball = null
@@ -93,7 +100,7 @@ func is_primary_flying() -> bool:
 
 ## 还有余量再生成一颗副球吗（分裂砖的效果上限就是它）。
 func has_room() -> bool:
-	return count() < MAX_BALLS
+	return count() < max_balls_cap
 
 
 ## 记住挡板引用。挡板只是「吸附时的锚点」，本节点不持有它的所有权。

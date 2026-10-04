@@ -33,10 +33,11 @@ func _ready() -> void:
 ## best_combo / combo_total 展示连击战绩；为 0 时整行隐藏（第一关没打出连击很正常）。
 ## palette 传 null 时沿用默认强调色（老场景没配调色板也能跑）。
 ## legend 是本关出现的特殊砖名列表，由 Main 按布局表现算后传入；
-## 留成带默认值的参数，老调用方（只关心分数的那套）不必跟着改。
+## continue_text 覆盖「继续」按钮文案（无尽模式下下一步是抽卡而不是下一关）。
+## 两者都留成带默认值的参数，老调用方（只关心分数的那套）不必跟着改。
 func show_result(final_score: int, best_score: int, is_new_best: bool, mode: int,
 		level: int = 1, best_combo: int = 0, combo_total: int = 0,
-		palette: Palette = null, legend: String = "") -> void:
+		palette: Palette = null, legend: String = "", continue_text: String = "") -> void:
 	match mode:
 		Main.State.LEVEL_CLEAR:
 			title_label.text = "第 %d 关通过！" % level
@@ -47,6 +48,8 @@ func show_result(final_score: int, best_score: int, is_new_best: bool, mode: int
 		_:
 			title_label.text = "游戏结束"
 			continue_button.text = "再来一局"
+	if not continue_text.is_empty():
+		continue_button.text = continue_text
 
 	final_score_label.text = "最终分数 %d" % final_score
 	if is_new_best:
