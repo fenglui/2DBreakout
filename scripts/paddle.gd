@@ -37,9 +37,40 @@ var charge_ratio := 0.0
 			queue_redraw()
 @export var input_enabled := true
 
+## 扳挡状态：反弹角左右镜像。由 AbilitySystem 通过 Main 写入。
+## 挡板只负责「把自己长什么样」——高光条移到下沿。
+## 反弹算术在 Ball._deflect_from_paddle() 里，挡板不参与球的方向计算。
+@export var flipped := false:
+	set(value):
+		if flipped == value:
+			return
+		flipped = value
+		queue_redraw()
+
+## 热度条比例 0~1，0 时不画。由 Main 在热度换档时写入。
+## 画在挡板下沿而不是上沿：上沿已经有蓄力条，两条都在那儿会互相干扰，
+## 而蓄力的时间尺度（0.45s）与热度的（跨整关）本来就完全不同。
+var heat_ratio := 0.0:
+	set(value):
+		var clamped := clampf(value, 0.0, 1.0)
+		if is_equal_approx(clamped, heat_ratio):
+			return
+		heat_ratio = clamped
+		queue_redraw()
+
+## 热度条颜色。跟随当前调色板的强调色——它是「你正在拿精度换分数」的提示，
+## 和蓄力条同色系才读得出这两条是同一件事的两面。
+@export var heat_color := Color("fb8500"):
+	set(value):
+		heat_color = value
+		queue_redraw()
+
 ## 蓄力条几何：贴在挡板上沿，宽度与挡板一致
 const CHARGE_BAR_HEIGHT := 5.0
 const CHARGE_BAR_GAP := 5.0
+## 热度条几何：贴在挡板下沿，比蓄力条细（它不要求精确读数，只要求一眼看出在涨）
+const HEAT_BAR_HEIGHT := 3.0
+const HEAT_BAR_GAP := 4.0
 
 @onready var sensor: Area2D = $Sensor
 
@@ -108,17 +139,29 @@ func _on_sensor_body_entered(body: Node2D) -> void:
 func _draw() -> void:
 	var rect := Rect2(-Vector2(paddle_width, paddle_height) * 0.5, Vector2(paddle_width, paddle_height))
 	draw_rect(rect, color, true)
-	draw_rect(Rect2(rect.position, Vector2(rect.size.x, rect.size.y * 0.35)), color.lightened(0.4), true)
+	# 高光条在上沿还是下沿就是扳挡状态的读数：
+	# 球在板面上方弹开，高光在上沿时读作「球会往我按下的那一侧偏」，
+	# 高光翻到下沿则读作「会往反侧偏」。用位置而不是加一个图标来说明方向，
+		# 是因为图标要玩家去查对照表，而位置是直接可读的。
+	var highlight := Rect2(rect.position, Vector2(rect.size.x, rect.size.y * 0.35))
+	if flipped:
+		highlight.position.y = rect.position.y + rect.size.y * 0.65
+	draw_rect(highlight, color.lightened(0.4), true)
 	draw_rect(rect, color.darkened(0.4), false, 2.0)
 
-	if charge_ratio <= 0.0:
-		return
+	if charge_ratio > 0.0:
+		# 蓄力条：底槽 + 填充。底槽常驻是必要的，
+		# 否则玩家只能靠「条出现了」判断已经按上，没有参照物就看不出还剩多少。
+		var bar_top := rect.position.y - CHARGE_BAR_GAP - CHARGE_BAR_HEIGHT
+		var bar := Rect2(rect.position.x, bar_top, rect.size.x, CHARGE_BAR_HEIGHT)
+		draw_rect(bar, Color(0, 0, 0, 0.45), true)
+		var fill := Rect2(bar.position, Vector2(bar.size.x * charge_ratio, bar.size.y))
+		draw_rect(fill, charge_color, true)
+		draw_rect(bar, charge_color.darkened(0.3), false, 1.0)
 
-	# 蓄力条：底槽 + 填充。底槽常驻是必要的，
-	# 否则玩家只能靠「条出现了」判断已经按上，没有参照物就看不出还剩多少。
-	var bar_top := rect.position.y - CHARGE_BAR_GAP - CHARGE_BAR_HEIGHT
-	var bar := Rect2(rect.position.x, bar_top, rect.size.x, CHARGE_BAR_HEIGHT)
-	draw_rect(bar, Color(0, 0, 0, 0.45), true)
-	var fill := Rect2(bar.position, Vector2(bar.size.x * charge_ratio, bar.size.y))
-	draw_rect(fill, charge_color, true)
-	draw_rect(bar, charge_color.darkened(0.3), false, 1.0)
+	if heat_ratio <= 0.0:
+		return
+	var heat_bar := Rect2(rect.position.x,
+		rect.position.y + rect.size.y + HEAT_BAR_GAP,
+		rect.size.x * heat_ratio, HEAT_BAR_HEIGHT)
+	draw_rect(heat_bar, heat_color, true)

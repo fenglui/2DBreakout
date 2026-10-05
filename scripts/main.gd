@@ -10,42 +10,28 @@ enum State { PLAYING, PAUSED, GAME_OVER, LEVEL_CLEAR, WON, MENU, DRAFT }
 const VIEW_SIZE := Vector2(480, 720)
 const WALL_THICKNESS := 14.0
 
-# —— 砖墙布局 ——
-const BRICK_ROWS := 6
-const BRICK_COLUMNS := 8
-const BRICK_SIZE := Vector2(48, 20)
-const BRICK_GAP := 6.0
-const BRICK_TOP := 110.0
-const BRICK_TOTAL := BRICK_ROWS * BRICK_COLUMNS
+# —— 砖墙 ——
+# 网格尺寸、布局表、砖块分值与耐久都已经搬到 WallShapeProvider：
+# 它们本来就是「墙」的事，而不是「关卡流程」的事。
+# 这里保留同名别名，是为了让冒烟测试仍然能从 main.gd 的常量表里反查这些数字，
+# 从而「测试读的和游戏用的确实是同一份」这件事不需要另立一条约定。
+# 别名也意味着改值只需改一处，不会出现「墙按新值建、测试按旧值算」的分叉。
+const BRICK_ROWS := WallShapeProvider.ROWS
+const BRICK_COLUMNS := WallShapeProvider.COLUMNS
+const BRICK_SIZE := WallShapeProvider.SIZE
+const BRICK_GAP := WallShapeProvider.GAP
+const BRICK_TOP := WallShapeProvider.TOP
+const BRICK_LAYOUT := WallShapeProvider.TEMPLATE
+const BRICK_TOTAL := WallShapeProvider.TEMPLATE_TOTAL
+const POINTS_PER_BRICK := WallShapeProvider.POINTS_PER_BRICK
+const KIND_POINTS_MULT := WallShapeProvider.KIND_POINTS_MULT
+const ARMOR_EXTRA_HITS := WallShapeProvider.ARMOR_EXTRA_HITS
+
 ## 砖墙按行取色，索引越靠下越冷。调色板由 scripts/palette.gd 提供，
 ## 这里只保留第 1 关的默认色作为调色板缺失时的兜底。
 const ROW_COLORS := [
 	Color("f94144"), Color("f3722c"), Color("f9c74f"),
 	Color("90be6d"), Color("43aa8b"), Color("4cc9f0"),
-]
-
-## 砖墙布局表：6 行 × 8 列，数字对应 Brick.Kind
-## （0 普通 / 1 加固 / 2 生命 / 3 分数 / 4 爆破 / 5 分裂 / 6 减速）。
-##
-## 用字面数字而不是 Brick.Kind.ARMORED：这张表要能被冒烟测试原样读出来做交叉核对
-## （每一项都必须是合法 kind，且六种特殊砖都真实出现在墙上），
-## 写成符号反而多一层需要同步的约定。
-##
-## 第 0 行整行保持普通砖，两个理由：
-## 1) 它是最容易够到的一行，玩家第一眼看到的仍是熟悉的东西；
-## 2) 冒烟测试有一条「第 2 关首个砖块耐久 == 本关标准」的断言，而 get_child(0)
-##    正好是这块砖。它一旦变成加固砖，断言就得跟着改；让测试锚点与
-##    「设计上本来就该保持普通」的那一行重合，比在测试里写例外便宜得多。
-##
-## 末行也留了两块普通砖：通关用例靠「最后两块砖」模拟最后一击，
-## 那两块必须是纯计分的普通砖，否则爆破连锁会在结算前改掉分数口径。
-const BRICK_LAYOUT := [
-	[0, 0, 0, 0, 0, 0, 0, 0],
-	[0, 1, 0, 0, 3, 0, 0, 0],
-	[0, 0, 0, 4, 0, 5, 0, 0],
-	[0, 0, 2, 0, 0, 0, 4, 0],
-	[0, 6, 0, 5, 0, 1, 0, 3],
-	[0, 0, 2, 4, 0, 0, 0, 0],
 ]
 
 ## 每关配色。索引按关卡循环，超出关卡数复用第一套。
@@ -54,7 +40,6 @@ const BRICK_LAYOUT := [
 
 # —— 玩法数值 ——
 const START_LIVES := 3
-const POINTS_PER_BRICK := 10
 const PADDLE_START_Y := 640.0
 const DEATH_Y := 760.0
 ## 生命上限。生命砖是「+1 命」，但必须有天花板，
@@ -62,12 +47,6 @@ const DEATH_Y := 760.0
 const MAX_LIVES := 5
 
 # —— 特殊砖 ——
-## 各 kind 的分数倍率（乘 POINTS_PER_BRICK，索引与 Brick.Kind 对齐）。
-## 刻意让每一项都是 POINTS_PER_BRICK 的整数倍：冒烟测试有一条
-## 「总分始终是每块砖分值的整数倍」的不变量断言，倍率不是整数倍就会打破它。
-const KIND_POINTS_MULT := [1, 2, 3, 5, 4, 4, 3]
-## 加固砖在本关标准耐久之上多挨几下
-const ARMOR_EXTRA_HITS := 2
 ## 爆破砖的波及半径（像素）。砖格间距是 54×26，这个值刚好覆盖八邻域
 ## （对角距离 sqrt(54²+26²) ≈ 60 < 66）而不波及隔一个的砖。
 const BLAST_RADIUS := 66.0
@@ -79,34 +58,27 @@ const SLOW_SECONDS := 4.0
 const SPLIT_SPREAD_DEG := 24.0
 
 # —— 蓄力发射 ——
-## 蓄满所需秒数。取 0.45s：短到连续点按不会觉得黏，长到刻意蓄力能拉出角度差。
-const CHARGE_SECONDS := 0.45
-## 蓄满时球速相对本关基准的倍率
-const CHARGE_SPEED_MUL := 1.35
-## 蓄力时横向可偏转的最大角度（弧度，0 = 正上方）
-## 取 0.62（≈35.5°）而不是更大：再大就基本是贴墙平射，
-## 玩家会失去「打向砖墙中部」的能力。
-const MAX_CHARGE_TILT := 0.62
+# 这五个常量已经搬到 CaughtBallFlow：蓄满秒数、提速倍率、最大偏转角、预测线段数与掩码
+# 全都属于「发射循环」本身，Main 只负责在换关时把球速口径注入进去。
+# 同名别名继续留在这里，原因同砖墙那组：冒烟测试从这里反查，
+# 就不必知道哪一个常量搬到了哪个节点，也就不必跟着搬。
+const CHARGE_SECONDS := CaughtBallFlow.CHARGE_SECONDS
+const CHARGE_SPEED_MUL := CaughtBallFlow.CHARGE_SPEED_MUL
+const MAX_CHARGE_TILT := CaughtBallFlow.MAX_CHARGE_TILT
+const AIM_BOUNCES := CaughtBallFlow.AIM_BOUNCES
+const AIM_MASK_WALL := CaughtBallFlow.AIM_MASK_WALL
+const AIM_MASK_BRICK := CaughtBallFlow.AIM_MASK_BRICK
 
 # —— 换肤 ——
 ## 换色过渡时长。0.35s 足够让「进入下一关」有视觉分量，又不至于让玩家等。
 const PALETTE_FADE_TIME := 0.35
 
 # —— 连击 ——
-## 连击计数达到该值才在 HUD 上打出连击数字、并触发连击飘字
-const COMBO_HIGHLIGHT := 3
-
-# —— 预测线 ——
-## 预测的反射次数。3 次足够看出「会打到哪一行的哪一列」，再多只是噪点。
-const AIM_BOUNCES := 3
-## 预测线只关心墙体与砖块，位值与 project.godot 的 layer_names 一致
-## （1=Wall，4=Brick）。挡板是第 2 层、球是第 4 位，这里都不参与。
-const AIM_MASK_WALL := 1
-const AIM_MASK_BRICK := 4
+# 连击阈值属于 HeatSystem（它已经连同连击计数与热度一起搬走了）。
+const COMBO_HIGHLIGHT := HeatSystem.COMBO_HIGHLIGHT
 
 # —— 连击拖尾 ——
-## 连击达到该值时拖尾增粗并偏暖到 BallTrail.GLOW_COLOR
-const COMBO_GLOW_AT := 5
+const COMBO_GLOW_AT := HeatSystem.COMBO_GLOW_AT
 
 # —— 关卡递进 ——
 const MAX_LEVEL := 3
@@ -140,6 +112,13 @@ const CARD_BRICK_HITS_MAX := 4
 @onready var ball_trail: BallTrail = $BallTrail
 @onready var paddle: Paddle = $Paddle
 @onready var balls: BallManager = $Balls
+## —— 四个玩法系统节点 ——
+## Main 只做编排：注入依赖、订阅信号、决定分数与生命怎么变。
+## 每块玩法逻辑的**内部状态**都在各自的节点里，Main 不再持有副本。
+@onready var ball_flow: CaughtBallFlow = $CaughtBallFlow
+@onready var heat: HeatSystem = $HeatSystem
+@onready var abilities: AbilitySystem = $AbilitySystem
+@onready var wall: WallShapeProvider = $WallShapeProvider
 @onready var hud: GameHUD = $HUD
 @onready var game_over_panel: GameOverPanel = $GameOverPanel
 @onready var pause_panel: PausePanel = $PausePanel
@@ -157,22 +136,55 @@ var _level := 1
 var _bricks_cleared := 0
 var _restarting := false
 
-## —— 蓄力发射 ——
-## 蓄力进度 0~1；_charging 为按下空格但尚未松手的窗口。
-## _charge_dir 记录蓄力期间按下的左右键，让玩家能主动选择发射方向，
-## 而不是像原版那样交给随机数。
-var _charging := false
-var _charge := 0.0
-var _charge_dir := 0.0
-
 ## —— 连击 ——
-## _combo 统计「当前这次飞行中连续击破的砖数」。
-## 规则：任意一颗球被挡板接住时清零并把计数折算成额外分数结算；
-## 场上球全部掉光则整段作废。这让「一球打穿更多砖」有了明确收益。
-var _combo := 0
-## 已入账的连击总次数，仅用于结算面板展示
-var _combo_total := 0
-var _best_combo := 0
+## _combo / _charge 这类字段已经不再是 Main 的权威来源，它们变成了转发到
+## HeatSystem 与 CaughtBallFlow 的门面属性。
+##
+## 刻意保留它们（而不是让所有调用点直接改写成 heat.combo()）：
+## 冒烟测试有二十多处用 node.get("_combo") / node.set("_combo", …) 直接读写，
+## 而这套测试是这个项目唯一的安全网。让 Main 继续提供同名门面，
+## 网就不必跟着重构一起重写；同时「Main 是门面、系统是属主」这件事
+## 在代码上也变得一眼可见——想改规则的人会走到节点里去。
+
+## 当前这次飞行中连续击破的砖数。转发到 HeatSystem。
+var _combo: int:
+	get:
+		return heat.combo() if heat != null else 0
+	set(value):
+		if heat != null:
+			heat.set_combo(value)
+
+## 连击总数与最好连击**没有**门面：冒烟测试从不读它们，
+## 而 Main 里也只有结算面板一处在用。为两个「只有一处读者」的字段包一层
+## 转发属性，读者看到的是一个不存在的来源（「_best_combo 是真的还是转发来的？」），
+## 排查时要多绕一层。所以它们直接读 heat.combo_total() / heat.best_combo()。
+
+## —— 蓄力发射 ——
+## _charging / _charge / _charge_dir 转发到 CaughtBallFlow。
+var _charging: bool:
+	get:
+		return ball_flow != null and ball_flow.is_charging()
+	set(value):
+		# 外部（测试）把它写成 true 时无法凭空造出一颗可蓄力的球，
+		# 因此这里只保证「后续读到的状态与写入意图一致」——具体见
+		# CaughtBallFlow.on_launch_pressed()，正常路径不走这个 setter。
+		if ball_flow != null and not value:
+			ball_flow.reset()
+
+## 蓄力进度 0~1
+var _charge: float:
+	get:
+		return ball_flow.charge_ratio() if ball_flow != null else 0.0
+
+## 本关布局表。转发到 WallShapeProvider（砖墙的属主）。
+## 冒烟测试有三处读它做交叉核对（「本关布局 == BRICK_LAYOUT」类断言），
+## 所以门面必须留着；写入方向也留着，是为了让任何一处「换一堵墙」都能走同一条路。
+var _level_layout: Array:
+	get:
+		return wall.layout if wall != null else []
+	set(value):
+		if wall != null:
+			wall.layout = value
 
 ## —— 减速砖 ——
 ## 剩余减速秒数。用秒数递减而不是记结束时刻：暂停时物理帧停摆，
@@ -184,10 +196,6 @@ var _slow_left := 0.0
 ## 两者在选完玩法的那一刻定死，中途不变——每日挑战的全部意义就在这里。
 var _mode := GameMode.Mode.CLASSIC
 var _seed := GameMode.CLASSIC_SEED
-## 本关的布局表：BRICK_LAYOUT 经 LevelGenerator 处理后的结果。
-## 经典模式（种子 0）下它逐位等于 BRICK_LAYOUT，所以砖墙的读取点
-## （_build_bricks / _level_legend）不需要区分模式。
-var _level_layout: Array = []
 
 ## —— 卡牌 ——
 ## 本局累积的加成表 {mod_key: 数值}。加法型累加、乘法型累乘，
@@ -221,6 +229,25 @@ func _ready() -> void:
 	aim_line.process_mode = Node.PROCESS_MODE_PAUSABLE
 	ball_trail.process_mode = Node.PROCESS_MODE_PAUSABLE
 	balls.process_mode = Node.PROCESS_MODE_PAUSABLE
+	# 接球流程同样 ALWAYS：它由 Main 的 _process 驱动，而 Main 是 ALWAYS，
+	# 于是暂停时那一次 tick() 仍然会发生，才能把蓄力条与预测线清干净。
+	# 反过来设 PAUSABLE 的话暂停面板上会留一条静止的预测线，
+	# 恢复后玩家会发现球已经不在蓄力态——「暂停把蓄力弄丢了」。
+	ball_flow.process_mode = Node.PROCESS_MODE_ALWAYS
+	# 热度与主动技相反：暂停时它们必须真的停表。
+	# 热度继续回落的话，暂停回来就白攒了一半；凝滞继续倒数的话，
+	# 玩家会看到「暂停了一秒，凝滞已经结束了」。AbilitySystem 自己在
+	# _ready 里设 PAUSABLE，这里不重复写。
+	heat.process_mode = Node.PROCESS_MODE_PAUSABLE
+
+	# —— 依赖注入：把四个玩法节点的协作对象交给它们 ——
+	# 用代码注入而不是 @export，是为了让「谁认识谁」只有代码这一处答案。
+	# 如果用 @export，Main.tscn 里也会有一份连线，于是「这条引用指向谁」
+	# 有两个可能的来源，而线断了不会有任何报错——球只是不再被接住。
+	ball_flow.balls = balls
+	ball_flow.paddle = paddle
+	ball_flow.aim_line = aim_line
+	ball_flow.ball_trail = ball_trail
 
 	# 连接信号。注意连的是 BallManager 而不是某颗球：
 	# 副球随时出生，逐球 connect 迟早会漏一颗，漏掉的那颗就是一个
@@ -231,6 +258,15 @@ func _ready() -> void:
 	balls.last_ball_lost.connect(_on_last_ball_lost)
 	balls.count_changed.connect(_on_ball_count_changed)
 	paddle.ball_on_paddle.connect(_on_ball_on_paddle)
+	# 接球流程的反馈信号：Main 只负责播音效与震动，不重复它的状态判定。
+	ball_flow.caught.connect(_on_ball_caught)
+	ball_flow.charge_filled.connect(_on_charge_filled)
+	ball_flow.launched.connect(_on_ball_launched)
+	# 热度换档：分数倍率直接进计分，挡板变窄是当场就能感觉到的那一半代价。
+	heat.heat_changed.connect(_on_heat_changed)
+	# 扳挡：AbilitySystem 不认识球，球也不认识按键，两边由 Main 搭线。
+	abilities.flip_changed.connect(_on_flip_changed)
+	abilities.bullet_time_changed.connect(_on_bullet_time_changed)
 	game_over_panel.continue_requested.connect(_on_continue_requested)
 	game_over_panel.quit_requested.connect(_on_quit_requested)
 	pause_panel.resume_requested.connect(_on_resume_requested)
@@ -250,71 +286,48 @@ func _ready() -> void:
 
 
 ## 依据墙体位置计算挡板活动范围与球的吸附/出界高度。
+##
+## unstick_y 依赖「这一关的墙有多高」，而墙的行数会随形状变化（第 4 关起不再恒为 6 行），
+## 所以它不能只在 _ready 里算一次：_sync_wall_metrics() 在每次 _start_level() 时重算。
+## 这里仍然调一次，是因为 balls.reset() 之前 unstick_y 需要已经是本关的值。
 func _configure_playfield() -> void:
 	paddle.position = Vector2(VIEW_SIZE.x * 0.5, PADDLE_START_Y)
 	balls.attach(paddle)
 	balls.stick_offset = paddle.paddle_height * 0.5 + balls.primary().radius + 4.0
 	balls.death_y = DEATH_Y
-	# 卡死脱离的安全落点：砖墙最底边 + 球半径 + 余量，这条线以下一定是空场，
-	# 球脱离后不会立刻又挤进下一行砖块里。
-	balls.unstick_y = BRICK_TOP + (BRICK_ROWS - 1) * (BRICK_SIZE.y + BRICK_GAP) \
-		+ BRICK_SIZE.y + balls.primary().radius + 6.0
+	_sync_wall_metrics()
 	balls.apply_to_all()
 
 
-## 运行时按行按列生成砖块，耐久与球速按当前关卡取值。
-## 砖色取自当前关卡调色板；调色板行色数量与 BRICK_ROWS 不一致时按取模循环。
-## 布局取自 _level_layout（BRICK_LAYOUT 经 LevelGenerator 按本局种子处理后的结果）：
-## 特殊砖是就地替换普通砖，砖块总数不变，因此 BRICK_TOTAL
-## 与「已清除计数达标即通关」这条判定都不用改。
-## 分数与耐久再乘/加上卡牌加成——加成是建墙时写进砖块属性的，
-## 不是每次命中时现算，因此「本关中途改加成」这种操作根本不存在。
-func _build_bricks() -> void:
-	for old_brick in bricks_root.get_children():
-		old_brick.queue_free()
+## 把「这面墙有多高」换算成球需要跟着调整的两个量。
+##
+## unstick_y 是卡死脱离的安全落点：砖墙最底边 + 球半径 + 余量，这条线以下一定是空场，
+## 球脱离后不会立刻又挤进下一行砖块里。
+## 它必须跟着本关行数走——墙长高之后还用旧的落点，脱离的球会正好停在最高一行砖上，
+## 下一秒又被推回砖堆里，看起来就是「球卡住了怎么打都不掉」。
+func _sync_wall_metrics() -> void:
+	balls.unstick_y = wall.bottom_edge() + balls.primary().radius + 6.0
 
-	var grid_width := BRICK_COLUMNS * BRICK_SIZE.x + (BRICK_COLUMNS - 1) * BRICK_GAP
-	var start_x := (VIEW_SIZE.x - grid_width) * 0.5
+
+## 按当前关卡与卡牌加成建出本关砖墙。
+##
+## 建墙本身已经搬到 WallShapeProvider（它拥有网格几何、形状与砖块数值），
+## Main 在这里只负责把「这一关怎么打」翻译成四个数字再递过去：
+## 本关标准耐久、分数倍率、额外耐久、加固砖额外耐久。
+## 翻译留在 Main 的理由是这四项全部来自 Main 的关卡表与卡牌表——
+## 砖墙不该知道 LEVEL_BRICK_HITS，也不该知道「加固」这张牌。
+func _build_bricks() -> void:
 	var base_hits: int = LEVEL_BRICK_HITS[(_level - 1) % LEVEL_BRICK_HITS.size()]
 	var palette := current_palette()
 	var row_colors: Array = palette.row_colors if palette != null else ROW_COLORS
-	var score_mult := _card_score_mult()
-	var extra_hits := _card_brick_hits_add()
-	var armor_extra := ARMOR_EXTRA_HITS + _card_armor_add()
-
-	for row in BRICK_ROWS:
-		var row_color: Color = row_colors[row % row_colors.size()]
-		for column in BRICK_COLUMNS:
-			var kind: int = int(_level_layout[row][column])
-			var brick := Brick.new()
-			brick.size = BRICK_SIZE
-			brick.kind = kind
-			brick.points = POINTS_PER_BRICK * int(KIND_POINTS_MULT[kind]) * score_mult
-			brick.color = row_color
-			# 只有加固砖额外加耐久；其余特殊砖沿用本关标准，
-			# 免得「特殊砖更难打」与「难度曲线由 LEVEL_BRICK_HITS 决定」两条规则打架。
-			brick.max_hits = base_hits + extra_hits + (armor_extra if kind == Brick.Kind.ARMORED else 0)
-			brick.hits_left = brick.max_hits
-			brick.position = Vector2(
-				start_x + column * (BRICK_SIZE.x + BRICK_GAP) + BRICK_SIZE.x * 0.5,
-				BRICK_TOP + row * (BRICK_SIZE.y + BRICK_GAP) + BRICK_SIZE.y * 0.5
-			)
-			bricks_root.add_child(brick)
+	wall.configure_build(base_hits, _card_score_mult(),
+		_card_brick_hits_add(), _card_armor_add())
+	wall.build(bricks_root, row_colors, VIEW_SIZE.x)
 
 
-## 本关出现的特殊砖名（行优先去重），用于结算面板的图例行。
-## 从布局表现算而不是统计场上残砖：结算时砖几乎被打光了，
-## 拿「还剩什么砖」去反推本关有什么砖，最后一行永远是空的。
+## 本关出现的特殊砖名（行优先去重），用于结算面板的图例行。转发到砖墙的属主。
 func _level_legend() -> String:
-	var names: Array[String] = []
-	for row in _level_layout:
-		for kind: int in row:
-			if kind == Brick.Kind.NORMAL:
-				continue
-			var kind_name := String(Brick.KIND_NAMES[kind])
-			if not names.has(kind_name):
-				names.append(kind_name)
-	return " · ".join(names)
+	return wall.legend()
 
 
 ## 当前生效的调色板；level_palettes 为空时返回 null（表示沿用默认色）。
@@ -363,8 +376,8 @@ func _start_new_game() -> void:
 	_score = 0
 	_lives = START_LIVES
 	_level = 1
-	_combo_total = 0
-	_best_combo = 0
+	heat.reset_run()
+	abilities.reset_run()
 	_reset_cards()
 	_start_level()
 
@@ -384,11 +397,23 @@ func _start_level() -> void:
 	_state = State.PLAYING
 	_bricks_cleared = 0
 	# 连击是「单次飞行内」的临时计数，换关必须清零，否则新关第一球就带着旧计数结算
-	_reset_charge()
-	_reset_combo()
+	ball_flow.reset()
+	# 热度同样按关清：它衡量的是「这一关里接球的连续性」，
+	# 跨关累计会让第 30 关一开始就顶在满档，玩家反而不敢再接球。
+	heat.reset_level()
+	# 停掉凝滞与扳挡：它们是「这一关的瞬时操作状态」，不是本局资源。
+	# 凝滞次数本身留在 AbilitySystem 里跨关保留（同护盾），停的只是计时器与扳挡开关。
+	abilities.reset()
 	_slow_left = 0.0
-	_level_layout = LevelGenerator.generate(_layout_seed(), _level, BRICK_LAYOUT)
-	balls.ball_speed = LEVEL_BALL_SPEED[(_level - 1) % LEVEL_BALL_SPEED.size()]
+	# 先让墙算出本关的形状与布局，再据此同步落点高度——顺序反了的话
+	# 第 4 关起 unstick_y 用的还是上一关 6 行墙的高度。
+	wall.generate(_layout_seed(), _level)
+	_sync_wall_metrics()
+	var base_speed: float = LEVEL_BALL_SPEED[(_level - 1) % LEVEL_BALL_SPEED.size()]
+	balls.ball_speed = base_speed
+	# 发射速率口径注入接球流程：它要知道自己这一发该按哪一档球速算，
+	# 但不该自己去查关卡表或卡牌表。
+	ball_flow.configure_speed(base_speed, _card_speed_mul())
 	balls.max_balls_cap = _card_max_balls()
 	_build_bricks()
 	_apply_paddle_width()
@@ -399,6 +424,9 @@ func _start_level() -> void:
 	# reset() 顺手清掉上一关残留的副球与减速状态：多球跨关累积会让新关一开局
 	# 就飘着五六颗球，关卡递进的「难度台阶」直接失效。
 	balls.reset()
+	# 球被重新吸附到挡板上之后，接球流程里可能还指着上一关那颗已被回收的球。
+	# 不清的话下一次按下 launch 会去访问一个已释放的实例。
+	ball_flow.on_ball_attached(balls.primary())
 	ball_trail.clear_trail()
 	_update_hud()
 	hud.set_hint(_launch_hint())
@@ -421,15 +449,32 @@ func _layout_seed() -> int:
 
 ## 吸附等待发射时的统一提示文本（关卡推进后由传感器回调覆盖，两处必须一致）。
 func _launch_hint() -> String:
-	return "按住 空格 蓄力，松开发射（第 %d 关 · 剩余生命 %d）" % [_level, _lives]
+	return "按住 %s 蓄力，松开发射 · 飞行中按住可接住 · Q 扳挡 · Shift 凝滞" \
+		% _launch_key_hint()
+
+
+## 从 InputMap 反查 launch 的键位，而不是把「空格」写死在文案里。
+## 键位一旦重映射，硬编码的提示就会开始撒谎——而提示撒谎比没有提示更糟，
+## 玩家会去找一个根本不存在的键。
+func _launch_key_hint() -> String:
+	var events := InputMap.action_get_events(&"launch")
+	for event: InputEvent in events:
+		if event is InputEventKey:
+			return OS.get_keycode_string((event as InputEventKey).physical_keycode)
+	return "空格"
 
 
 ## 挡板宽度随已失去的生命收窄，并同步重算可活动范围。
 ## 卡牌加宽是叠加在阶梯之上的偏置而不是改写阶梯本身：
 ## 直接把某一级替换成加宽值，「已失去 N 条命」这条难度曲线就断了。
+##
+## 热度惩罚也叠在这条链上——它是**减去**而不是「换一档」：
+## 热度换档时必须让挡板当场变窄（见 _on_heat_changed），
+## 所以这里只需要在算式里减一次，换档与扣命两条路径就共用同一个算式，
+## 不会出现「两处各写一遍减法，改了一处忘了另一处」。
 func _apply_paddle_width() -> void:
 	var lost := clampi(START_LIVES - _lives, 0, PADDLE_WIDTH_STEPS.size() - 1)
-	paddle.set_width(PADDLE_WIDTH_STEPS[lost] + _card_paddle_bonus())
+	paddle.set_width(PADDLE_WIDTH_STEPS[lost] + _card_paddle_bonus() - heat.paddle_penalty())
 	paddle.left_bound = WALL_THICKNESS + paddle.paddle_width * 0.5
 	paddle.right_bound = VIEW_SIZE.x - WALL_THICKNESS - paddle.paddle_width * 0.5
 	paddle.global_position.x = clampf(paddle.global_position.x, paddle.left_bound, paddle.right_bound)
@@ -624,14 +669,26 @@ func _unhandled_input(event: InputEvent) -> void:
 			and (event.is_action_pressed("launch") or event.is_action_pressed("restart")):
 		_on_continue_requested()
 	elif _state == State.PLAYING:
+		# 这里只做「把动作转交给属主」，不再判断这一帧归谁管：
+		# 按下 launch 时此刻有没有球、球是不是吸附的、要不要挂起接球意图，
+		# 全部由 CaughtBallFlow 自己回答。
+		# Main 以前在这里写着 `if balls.primary().attached_to_paddle` 这道门，
+		# 正是它让「球飞出去之后按空格」变成一个没有意义的动作——
+		# 接住球、蓄力瞄准这些手感投入因此在一颗球的一生里只生效一次。
 		if event.is_action_pressed("launch"):
-			# 球已在飞行时直接跳过：_begin_charge() 自身不判断 attached_to_paddle，
-			# 这道门在这里，否则会把已经飞出去的球重新拉回蓄力态。
-			if balls.primary().attached_to_paddle:
-				_begin_charge()
+			ball_flow.on_launch_pressed()
 			get_viewport().set_input_as_handled()
-		elif event.is_action_released("launch") and _charging:
-			_release_charge()
+		elif event.is_action_released("launch"):
+			ball_flow.on_launch_released()
+			get_viewport().set_input_as_handled()
+		elif event.is_action_pressed("bullet_time"):
+			abilities.on_bullet_time_input(true)
+			get_viewport().set_input_as_handled()
+		elif event.is_action_released("bullet_time"):
+			abilities.on_bullet_time_input(false)
+			get_viewport().set_input_as_handled()
+		elif event.is_action_pressed("flip"):
+			abilities.on_flip_pressed()
 			get_viewport().set_input_as_handled()
 
 
@@ -664,99 +721,15 @@ func _handle_draft_input(event: InputEvent) -> void:
 	get_viewport().set_input_as_handled()
 
 
-## 蓄力与发射：按住 launch 累积蓄力，松开时按蓄力强度决定发射角与球速。
+## 每帧把推进权交给接球流程。
 ##
-## 这里把「按下」和「松开」拆成两个分支，而不是像原版那样按下即发射，
-## 是为了让发射角与球速变成玩家的主动选择。仍然必须走 is_action_released：
-## 只看按下的话玩家没法控制发射时机。
-func _begin_charge() -> void:
-	_charging = true
-	_charge = 0.0
-	_charge_dir = 0.0
-	ball_trail.clear_trail()
-
-
-## 松开发射。蓄满（_charge >= 1）时按满力度打出去，没蓄满则按当前比例。
-func _release_charge() -> void:
-	if not _charging:
-		return
-	var power := clampf(_charge, 0.0, 1.0)
-	var direction := _launch_direction(power)
-	_reset_charge()
-	# 只给主球提速，不动 balls.ball_speed：副球按本关基准速率飞行。
-	# 如果把蓄力倍率写进权威字段，一次弱蓄力就会把场上所有球一起拽慢，
-	# 玩家会看到「我只是轻轻点了一下，飞着的球全变慢了」。
-	#
-	# 先改 speed 再 launch：launch() 用当前 speed 算初速度，
-	# 顺序反了的话第一帧会以旧速度出球，要等下一次 _physics_process 归一化才对，
-	# 表现为「满蓄力打出去的第一帧明显偏慢」。
-	#
-	# 速度与角度是两条独立的轴：Ball._clamp_direction() 是「归一化到 speed 后再钳角度」，
-	# 所以抬速度不会改变角度包络，MAX_CHARGE_TILT 才是发射角的唯一来源。
-	var launched := balls.primary()
-	launched.speed = LEVEL_BALL_SPEED[(_level - 1) % LEVEL_BALL_SPEED.size()] \
-		* lerpf(1.0, CHARGE_SPEED_MUL, power) * _card_speed_mul()
-	launched.launch(direction)
-	_play_sfx("launch")
-	_add_shake(0.06 + power * 0.06)
-
-
-## 蓄力强度 -> 发射方向。power=0 垂直向上，power=1 按 _charge_dir 偏转到最大角。
-## 横移方向同时由「当前是否按住左/右」决定：只蓄力不按键就是垂直上弹。
-## 注意这里读轴只是为了「锁存」方向到 _charge_dir：轴可能在蓄力中途松开，
-## 但已经锁定的方向要留到松开发射那一刻才作废，由 _reset_charge() 负责清零。
-func _launch_direction(power: float) -> Vector2:
-	var axis := Input.get_axis("move_left", "move_right")
-	if not is_zero_approx(axis):
-		_charge_dir = signf(axis)
-	var tilt := power * MAX_CHARGE_TILT * _charge_dir
-	return Vector2(sin(tilt), -cos(tilt))
-
-
-func _reset_charge() -> void:
-	_charging = false
-	_charge = 0.0
-	_charge_dir = 0.0
-	aim_line.clear_path()
-	paddle.set_charge(0.0)
-
-
-## 每帧推进蓄力进度并刷新预测线。
-## 放在 _process 而不是 _physics_process：蓄力是输入反馈，帧率无关；
-## 且 Main 是 PROCESS_MODE_ALWAYS，暂停时也能立刻把蓄力清掉。
+## Main 保留 _process 而不是让 CaughtBallFlow 自带一个，是为了守住一条既有约定：
+## Main 是 PROCESS_MODE_ALWAYS，所以暂停时这里仍然会跑，
+## 而「暂停时蓄力条与预测线必须立刻消失」这条行为正是靠这一点成立的。
+## 换句话说：驱动权在 Main（谁在跑帧），状态权属在 ball_flow（跑帧时算什么）——
+## 两件事分开之后，暂停/换关/结算三个分支只需要各自调一次 ball_flow.reset()。
 func _process(delta: float) -> void:
-	if _charging and _state == State.PLAYING:
-		var before := _charge
-		_charge = minf(1.0, _charge + delta / CHARGE_SECONDS)
-		paddle.set_charge(_charge)
-		# 只在「刚刚蓄满」这一帧播提示音。放进 _process 每帧判断也能work，
-		# 但那样每帧都会新建一次 Tween，蓄满后没人松手就会一直空转。
-		if before < 1.0 and _charge >= 1.0:
-			_play_sfx("charge")
-			_add_shake(0.05)
-			# 蓄满自动发射：不这么做玩家可以把空格按住不放，
-			# 满蓄力条亮着却迟迟不出球，看起来像卡住。
-			# auto-fire 只在这一帧触发（_charge 已被钳在 1.0，下一帧 before == 1.0）。
-			_release_charge()
-			return
-		_update_aim_line()
-	elif _charging:
-		# 暂停 / 结算 / 掉球时蓄力被强行中断：必须回到未蓄力态，
-		# 否则恢复后玩家会看到一个满蓄力条却按不动。
-		_reset_charge()
-	else:
-		aim_line.clear_path()
-
-
-## 蓄力时沿预测方向画反射预测线，让「角度可瞄」这件事真正可见。
-## 只在吸附态画：飞行中球已经有了确定的运动方向，再画线是噪音。
-func _update_aim_line() -> void:
-	if not balls.primary().attached_to_paddle:
-		aim_line.clear_path()
-		return
-	# 预测线只看墙与砖（层 1 与层 4）：把挡板算进去会让线在脚边就撞上自己
-	aim_line.predict(balls.primary().global_position, _launch_direction(_charge),
-		AIM_BOUNCES, AIM_MASK_WALL | AIM_MASK_BRICK, 0.55)
+	ball_flow.tick(delta, _state == State.PLAYING)
 
 
 func _set_paused(paused: bool) -> void:
@@ -767,6 +740,14 @@ func _set_paused(paused: bool) -> void:
 	# 暂停瞬间归零震动，避免「已暂停」画面上相机还在随机跳动
 	if paused:
 		_reset_shake()
+	# 停掉凝滞与扳挡。它们是「正在进行的操作」，不是「暂停前的状态快照」——
+	# 暂停时若让凝滞继续倒数，玩家会看到「我暂停了一秒，回来凝滞已经结束了」。
+	abilities.reset()
+	# 蓄力同理：暂停时若保留，恢复后会看到一个按不动的满蓄力条。
+	# ball_flow 是 PROCESS_MODE_ALWAYS，暂停中仍会跑 tick()，
+	# 但那次 tick 只负责清空，真正在这里再清一次是为了让
+	# 「暂停面板上不该有一条还在涨的预测线」这件事在同一帧就成立。
+	ball_flow.reset()
 
 
 ## 球撞到砖块：加分、播碎屑与音效；耐久耗尽才计入“已清除”，全部清除即结算。
@@ -778,7 +759,7 @@ func _on_brick_hit(ball: Ball, brick: Node) -> void:
 	if typed == null:
 		return
 
-	_score += typed.hit()
+	_score += _brick_score(typed.hit())
 	var destroyed := typed.is_destroyed()
 
 	_spawn_sparks(typed.global_position, typed.color,
@@ -801,8 +782,7 @@ func _on_brick_hit(ball: Ball, brick: Node) -> void:
 func _register_break(_brick: Brick) -> void:
 	_bricks_cleared += 1
 	# 只有真正击破才累计连击：擦着打不动的砖不该给玩家「我在连击」的错觉
-	_combo += 1
-	_best_combo = maxi(_best_combo, _combo)
+	heat.register_break()
 	_update_hud()
 
 
@@ -810,8 +790,12 @@ func _register_break(_brick: Brick) -> void:
 ## 用计数器而不是 get_child_count() 判定：Brick.hit() 内部是 queue_free()，
 ## 被击破的砖块要到帧末才从子节点移除，若最后一帧同时击破两块砖，
 ## 计数会一直停在 2 之上，只查子节点数就会漏判。
+##
+## 阈值取 wall.total 而不是写死 BRICK_TOTAL：墙的行数会随形状变化，
+## 「这一关有几块砖」这件事的唯一权威是砖墙自己。
+## 阈值取自属主而不是在判定处重算一遍形状，是为了让「加一种形状」只需要改一个文件。
 func _check_level_cleared() -> void:
-	if _bricks_cleared >= BRICK_TOTAL:
+	if _bricks_cleared >= wall.total:
 		_settle(_level_clear_state())
 
 
@@ -885,14 +869,14 @@ func _blast(center: Brick) -> void:
 			if neighbor.global_position.distance_to(epicenter.global_position) > radius:
 				continue
 			visited[neighbor.get_instance_id()] = true
-			_score += neighbor.hit()
+			_score += _brick_score(neighbor.hit())
 			_spawn_sparks(neighbor.global_position, neighbor.color, 14, 0.9)
 			_register_break(neighbor)
 			if neighbor.kind == Brick.Kind.EXPLOSIVE:
 				pending.append(neighbor)
 		# 通关判定必须在连锁过程中随时复查：连锁把最后几块砖清掉时
 		# 场上的球已经被 _settle() 冻结，剩下的波及就不该再改分数了。
-		if _bricks_cleared >= BRICK_TOTAL:
+		if _bricks_cleared >= wall.total:
 			_settle(_level_clear_state())
 			return
 	_update_hud()
@@ -923,37 +907,44 @@ func _slow_balls() -> void:
 	hud.set_hint("减速 %.1f 秒" % _slow_left)
 
 
-## 连击奖励公式（纯函数）。
+## 连击奖励公式（纯函数）的转发入口。真实实现已经搬到 HeatSystem（它连同连击状态一起搬走了）。
 ##
-## 取 `(combo - 1) * POINTS_PER_BRICK`：第 2 块砖起每多一块多给一份，
-## 于是 2→1×、3→2×、4→3×，线性递增。刻意避开三角数公式 `combo*(combo+1)/2`：
-## 那会让 1 块砖也白送一份分，而 1 块砖是完全不需要技巧的默认操作，
-## 送分等于告诉玩家「乱打也有奖励」。这里从 2 起算，第一块只拿基础分。
-## 全程只做整数乘加，总分始终是每块砖分值的整数倍——
-## 冒烟测试有一条断言专门守这个不变量。
-##
-## 声明成 static 是刻意的：冒烟测试直接调用它算期望值，
-## 而不是把公式抄一份进测试——抄副本的话，公式一改测试就会静默失效。
+## 这里保留同名转发，理由和砖墙常量那组一样：冒烟测试用
+## `_main_script.call("combo_bonus_for", combo)` 来算期望值，
+## 转发能让测试不必知道公式搬到了哪个节点，也就不必跟着搬。
+## 转发而不是把公式抄一份，是关键——抄副本的话公式一改测试就静默失效。
 static func combo_bonus_for(combo: int) -> int:
-	return maxi(0, combo - 1) * POINTS_PER_BRICK
+	return HeatSystem.combo_bonus_for(combo)
 
 
 ## 连击结算：把「这一次飞行打掉几块砖」折算成额外分数。
+## 连击的计数、公式、清零全在 HeatSystem 里，Main 只做「把这笔分加进总分」。
 func _bank_combo() -> int:
-	if _combo <= 0:
-		_reset_combo()
-		return 0
-	var bonus := combo_bonus_for(_combo) * _card_combo_mult()
+	heat.configure_combo_mult(_card_combo_mult())
+	var bonus := heat.bank()
 	if bonus > 0:
 		_score += bonus
-		_combo_total += 1
-	_reset_combo()
 	return bonus
 
 
-## 清零连击计数。回挡板（已结算）、掉光（作废）、换关（跨关不算）都走这里。
-func _reset_combo() -> void:
-	_combo = 0
+## 连击作废。掉球时整段丢弃而不入账：这是 combo 的风险面。
+## 如果掉球也结算，玩家会无脑刷砖等结算，反而不会去接球。
+func _discard_combo() -> void:
+	heat.discard()
+
+
+## 一块砖该加多少分：砖块基础分 × 当前热度倍率。
+##
+## 热度倍率必须是整数（HeatSystem 的 HEAT_TIER_MULT 全部是整数），
+## 这是「总分始终是每块砖分值的整数倍」这条不变量不被打破的前提。
+##
+## 之所以包一个函数而不是在两处写 `x * heat.score_mult()`：
+## 球撞碎与爆破连锁是两条计分路径，抄两遍的话将来有人给其中一条漏乘，
+## 症状是「靠爆破打完的墙，总分除不尽砖块单价」。
+## 而这条不变量在 headless 里因为热度恒为 0 照样通过，只有真实游玩才炸——
+## 属于「测试环境恰好绕过的那类坑」，比它挡住的 bug 更难查。
+func _brick_score(points: int) -> int:
+	return points * heat.score_mult()
 
 
 ## 球撞墙：轻震 + 短促音效。撞墙会打断连击节奏，但不结算也不清零——
@@ -969,9 +960,15 @@ func _on_wall_hit(_ball: Ball) -> void:
 ##
 ## 多球下任意一颗球回到挡板都算这一段结束：连击本来就是「一次往返」的奖励，
 ## 让第一颗球回来就入账，之后回来的球自然无事可做。
-func _on_paddle_hit(_ball: Ball) -> void:
+##
+## 接球流程必须先被通知：它要在「这一颗球碰板」这一帧判断要不要把它粘住，
+## 而它拿到的是球本身，判断依据全在球身上（是否已吸附）。
+## 顺序反过来（先入账再通知）也不会错——接住本来也该结算连击——但先通知能让
+## 「接住」这件事在这次碰板里第一时间生效，反馈顺序与玩家的直觉一致。
+func _on_paddle_hit(ball: Ball) -> void:
 	if _state != State.PLAYING:
 		return
+	ball_flow.on_paddle_contact(ball)
 	_play_sfx("paddle")
 	_add_shake(0.14)
 	var combo := _combo
@@ -984,6 +981,62 @@ func _on_paddle_hit(_ball: Ball) -> void:
 		var pitch := clampf(1.0 + float(combo - COMBO_HIGHLIGHT) * 0.06, 1.0, 2.0)
 		_play_sfx("combo", pitch)
 		_add_shake(minf(0.1 + float(combo) * 0.02, 0.35))
+
+
+## 球被主动接住了：热度 +1，并给出一次「接住了」而不是「碰了一下」的反馈。
+##
+## 音效复用 paddle：新增一个接球专属预设要动 SfxBus 的预设表与测试的
+## 「用到的音效必须在表里」断言，收益却不明显——两者在听觉上本来就是同一件事。
+## 区分靠震动强度与 HUD 提示，不靠音色。
+func _on_ball_caught(_ball: Ball) -> void:
+	heat.register_catch()
+	_play_sfx("paddle")
+	_add_shake(0.22)
+	hud.set_hint("接住！按住 %s 蓄力，松开发射" % _launch_key_hint())
+
+
+## 蓄满的那一帧。sfx 走 ball_flow 的 charge_filled，而不是在这发信号里重算，
+## 这样「什么算蓄满」只有一个定义。
+func _on_charge_filled() -> void:
+	_play_sfx("charge")
+	_add_shake(0.05)
+
+
+## 球被打出去了。
+##
+## 这条信号只用来做反馈。发射本身已经由 CaughtBallFlow 直接对球完成了——
+## 结算分数的路径刻意不开在这里，否则「谁负责把分加进去」会同时有两个答案：
+## 一份在接球流程里（它算的 power），一份在 Main 里（它算的分数）。
+func _on_ball_launched(_ball: Ball, power: float) -> void:
+	_play_sfx("launch")
+	_add_shake(0.06 + power * 0.06)
+
+
+## 热度换档：立刻反映到挡板宽度与 HUD 分数倍率上。
+##
+## 「立刻」是这条连接存在的全部理由。如果等到下一次 _apply_paddle_width() 才生效，
+## 玩家会先看到分数倍率变成 2、过一会儿挡板才窄——两件事看起来像两个不相干的系统。
+func _on_heat_changed(ratio: float, mult: int, penalty: float) -> void:
+	# 直接写 heat_ratio 字段而不是调一个 set_heat()：
+	# paddle.gd 里 heat_ratio 自带 setter（写值即重绘），所以「赋值」就是全部协议。
+	# 另写一个 set_heat() 只会多出第二个能改这块布尔的入口，
+	# 而两个入口里漏掉其中一个的后果是「重绘有时不发生」——极难查。
+	paddle.heat_ratio = ratio
+	_apply_paddle_width()
+	if mult > 1:
+		hud.set_hint("热度 ×%d（挡板窄 %.0f px）" % [mult, penalty])
+
+
+## 扳挡开关变化：把状态同步给场上所有球，并让挡板给出可见反馈。
+func _on_flip_changed(flipped: bool) -> void:
+	balls.apply_flip(flipped)
+	paddle.flipped = flipped
+
+
+## 凝滞开始 / 结束。发提示而不是自己改任何东西：
+## Engine.time_scale 由 AbilitySystem 自己持有与还原，Main 碰它就等于多一个能改坏它的点。
+func _on_bullet_time_changed(active: bool) -> void:
+	hud.set_hint("凝滞" if active else _launch_hint())
 
 
 ## 场上最后一颗球掉出底部：生命 -1、挡板收窄，连击作废，归零则游戏结束。
@@ -1000,7 +1053,7 @@ func _on_last_ball_lost() -> void:
 		_shield -= 1
 		_play_sfx("powerup")
 		_add_shake(0.4)
-		_reset_combo()
+		_discard_combo()
 		balls.stick_primary()
 		_update_hud()
 		hud.set_hint("护盾挡下一次掉球（剩余 %d）" % _shield)
@@ -1008,7 +1061,11 @@ func _on_last_ball_lost() -> void:
 	_lives -= 1
 	_play_sfx("life")
 	_add_shake(0.75)
-	_reset_combo()
+	_discard_combo()
+	# 热度一并清掉：热度本来是「拿操作精度换分数」，
+	# 掉了球说明这次精度没押中，惩罚不兑现等于热度没有风险面——
+	# 那样它就退化成一个只涨不跌、越攒越好的纯增益。
+	heat.reset_heat()
 	_apply_paddle_width()
 
 	if _lives <= 0:
@@ -1018,6 +1075,7 @@ func _on_last_ball_lost() -> void:
 		return
 
 	balls.stick_primary()
+	ball_flow.on_ball_attached(balls.primary())
 	_update_hud()
 	hud.set_hint(_launch_hint())
 
@@ -1067,7 +1125,11 @@ func _settle(final_state: int) -> void:
 	# 结算后挡板不再响应输入，避免挡板在结算面板后面滑来滑去
 	paddle.input_enabled = false
 	# 清掉蓄力与预测线：结算时球已冻结，蓄力条还亮着会让人以为还能操作
-	_reset_charge()
+	ball_flow.reset()
+	# 凝滞必须停：结算面板上游戏仍然是「慢动作」的话，
+	# 面板自己的 Tween 会跟着一起变慢，「再来一局」的响应也变得黏。
+	# 结算面板的「再来一局」走场景重载，_exit_tree 里还有一道还原兜底。
+	abilities.reset()
 	ball_trail.clear_trail()
 	# 最后一球打空砖墙时连击还没入账，这里补结算，否则玩家会丢掉通关那一击的奖励
 	if _combo > 0:
@@ -1101,8 +1163,8 @@ func _settle(final_state: int) -> void:
 	if final_state == State.LEVEL_CLEAR:
 		continue_text = "抽卡牌" if card_step else "下一关"
 	game_over_panel.show_result(_score, _best, is_new_best, final_state, _level,
-		_best_combo, _combo_total, current_palette(), "特殊砖 " + _level_legend(),
-		continue_text)
+		heat.best_combo(), heat.combo_total(), current_palette(),
+		"特殊砖 " + _level_legend(), continue_text)
 
 
 ## 破纪录则写入 user:// 存档，返回是否刷新纪录。
@@ -1181,8 +1243,10 @@ func _update_hud() -> void:
 	# 无尽模式没有最后一关，max_level 传 0 让 HUD 走「第 N 关」的单数写法；
 	# 硬塞 MAX_LEVEL 会让玩家在第 40 关看到「第 40 / 3 关」。
 	hud.set_level(_level, 0 if GameMode.is_endless(_mode) else MAX_LEVEL)
-	# 连击达到阈值才在 HUD 上显示：1 连击每次都在闪，纯粹是噪音
-	hud.set_combo(_combo if _combo >= COMBO_HIGHLIGHT else 0)
+	# 「低于阈值不上 HUD」这条规则住在 HeatSystem 里（display_combo），
+	# Main 不再自己抄一遍阈值比较——抄一遍的话，改阈值就得记得改两处，
+	# 而漏掉的那处症状是「连击数偶尔在 HUD 上闪一下」，极难定位。
+	hud.set_combo(heat.display_combo())
 	# 球数只在 >1 时显示：单球是常态，一直占着 HUD 只会让特殊状态不显眼
 	hud.set_balls(balls.count())
 	hud.set_mode(_mode_label())
@@ -1224,7 +1288,7 @@ func _physics_process(delta: float) -> void:
 	# 颜色与线宽都交给 BallTrail 自己派生（基色 = 当前调色板 trail），
 	# 这里只给一个 0~1 的强度——反过来在 Main 里拼颜色，
 	# 换肤 tween 写进来的基色会被下一帧的逐帧赋值立刻盖掉。
-	var intensity := clampf(float(_combo) / float(COMBO_GLOW_AT), 0.0, 1.0)
+	var intensity := heat.trail_intensity()
 	ball_trail.line_width = lerpf(BallTrail.MIN_WIDTH, BallTrail.MAX_WIDTH, intensity)
 	ball_trail.set_intensity(intensity)
 

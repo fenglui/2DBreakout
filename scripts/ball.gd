@@ -53,6 +53,13 @@ const FROST_COLOR := Color("8ecae6")
 ## 卡死脱离时把球至少放到这条线以下（Main 按砖墙布局写入），此线以下一定是空场
 @export var unstick_y := 275.0
 
+## 扳挡：反弹角左右镜像。由 BallManager.apply_flip() 批量写入，
+## 不是 @export —— 球由 BallManager 运行时生成，没有场景文件可配。
+## 它必须存在每颗球上而不是只在 BallManager 上存一份：
+## 反弹是逐帧发生在这颗球身上的，查询要走 get_node("Balls").apply_flip()
+## 的话每次碰板都要穿两跳，而漏掉一次同步就是「一颗球扳挡了其余没扳」。
+var flipped := false
+
 var attached_to_paddle := true
 
 var _paddle: Node2D = null
@@ -211,11 +218,18 @@ func _unstick() -> void:
 
 ## 根据击中挡板的位置重新计算反弹角度：
 ## 正中 = 垂直向上，边缘 = 大角度斜飞。
+##
+## flipped 为真时整个偏转角左右镜像（扳挡）。镜像的是**偏转量**而不是最终角度：
+## `PI/2 + offset` 与 `PI/2 - offset` 互为镜像，所以只改这一处的符号就够；
+## 但刻意不复用「取负」——对角度取负会得到 `-PI/2 + offset`，那是往下飞，
+## 属于「负号加错了地方」这类看起来能跑但语义完全错掉的写法。
 func _deflect_from_paddle() -> void:
 	var offset := 0.0
 	if is_instance_valid(_paddle):
 		var half_width := maxf(float(_paddle.get("paddle_width")) * 0.5, 1.0)
 		offset = clampf((global_position.x - _paddle.global_position.x) / half_width, -1.0, 1.0)
+	if flipped:
+		offset = -offset
 
 	var angle := PI * 0.5 - offset * MAX_DEFLECT_ANGLE  # PI/2 为正上方
 	velocity = Vector2(cos(angle), -sin(angle))

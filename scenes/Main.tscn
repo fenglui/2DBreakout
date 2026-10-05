@@ -1,4 +1,4 @@
-[gd_scene load_steps=18 format=3]
+[gd_scene load_steps=22 format=3]
 
 [ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/paddle.gd" id="2_paddle"]
@@ -8,6 +8,10 @@
 [ext_resource type="Script" path="res://scripts/pause_panel.gd" id="6_pause"]
 [ext_resource type="Script" path="res://scripts/aim_line.gd" id="7_aim"]
 [ext_resource type="Script" path="res://scripts/ball_trail.gd" id="8_trail"]
+[ext_resource type="Script" path="res://scripts/caught_ball_flow.gd" id="14_flow"]
+[ext_resource type="Script" path="res://scripts/heat_system.gd" id="15_heat"]
+[ext_resource type="Script" path="res://scripts/ability_system.gd" id="16_ability"]
+[ext_resource type="Script" path="res://scripts/wall_shape_provider.gd" id="17_wall"]
 [ext_resource type="Resource" path="res://scripts/palette_space.tres" id="9_pal_space"]
 [ext_resource type="Resource" path="res://scripts/palette_violet.tres" id="10_pal_violet"]
 [ext_resource type="Resource" path="res://scripts/palette_lava.tres" id="11_pal_lava"]
@@ -94,6 +98,18 @@ shape = SubResource("RectangleShape2D_sensor")
 
 [node name="Balls" type="Node2D" parent="."]
 script = ExtResource("3_balls")
+
+[node name="CaughtBallFlow" type="Node2D" parent="."]
+script = ExtResource("14_flow")
+
+[node name="HeatSystem" type="Node2D" parent="."]
+script = ExtResource("15_heat")
+
+[node name="AbilitySystem" type="Node2D" parent="."]
+script = ExtResource("16_ability")
+
+[node name="WallShapeProvider" type="Node2D" parent="."]
+script = ExtResource("17_wall")
 
 [node name="Camera2D" type="Camera2D" parent="."]
 position = Vector2(240, 360)

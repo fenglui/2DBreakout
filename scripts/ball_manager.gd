@@ -42,6 +42,9 @@ var speed_scale := 1.0
 ## 当前生效的同屏球数上限。换关时由 Main 按卡牌加成重新写入，
 ## 因此它必须是字段而不是到处直接读 MAX_BALLS 常量。
 var max_balls_cap := MAX_BALLS
+## 当前扳挡状态（AbilitySystem 经 Main 写入）。存一份权威值的原因与 speed_scale 完全一样：
+## 扳挡期间分裂出来的球也必须处于镜像状态，否则「我明明开着扳挡，怎么这颗球没扳」。
+var flipped := false
 
 var _paddle: Node2D = null
 var _primary: Ball = null
@@ -164,6 +167,17 @@ func apply_speed_scale(scale: float) -> void:
 		ball.speed_scale = scale
 
 
+## 全场扳挡开关。与 apply_speed_scale 同构：状态记在本节点上，
+## 之后生成的副球由 _configure() 继承，因此不需要在分裂路径上补一次调用。
+##
+## 单独开一个方法而不是复用 apply_to_all()，是因为两者的频率差了两个数量级：
+## 扳挡是玩家每秒可能按三次的操作，apply_to_all() 是换关时的一次。
+func apply_flip(flipped_value: bool) -> void:
+	flipped = flipped_value
+	for ball in all_balls():
+		ball.flipped = flipped_value
+
+
 func _create_ball() -> Ball:
 	var ball := Ball.new()
 	ball.name = "Ball" if _primary == null else "BallExtra"
@@ -193,6 +207,7 @@ func _configure(ball: Ball) -> void:
 	ball.death_y = death_y
 	ball.unstick_y = unstick_y
 	ball.speed_scale = speed_scale
+	ball.flipped = flipped
 
 
 # —— 球的信号转接：对外只暴露「哪颗球发生了什么」，不暴露信号来源 ——

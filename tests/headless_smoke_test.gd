@@ -30,6 +30,10 @@ const GAME_MODE_SCRIPT := "res://scripts/game_mode.gd"
 const LEVEL_GENERATOR_SCRIPT := "res://scripts/level_generator.gd"
 const CARD_POOL_SCRIPT := "res://scripts/card_pool.gd"
 const META_PROGRESS_SCRIPT := "res://scripts/meta_progress.gd"
+const WALL_SCRIPT := "res://scripts/wall_shape_provider.gd"
+const HEAT_SCRIPT := "res://scripts/heat_system.gd"
+const FLOW_SCRIPT := "res://scripts/caught_ball_flow.gd"
+const ABILITY_SCRIPT := "res://scripts/ability_system.gd"
 const SAVE_PATH := "user://2d_breakout_save.cfg"
 const PANEL_VBOX := "GameOverPanel/Panel/Margin/VBox"
 const PAUSE_VBOX := "PausePanel/Panel/Margin/VBox"
@@ -76,6 +80,27 @@ var _slow_seconds := 0.0
 var _split_spread_deg := 0.0
 var _max_lives := 0
 var _max_balls := 0
+## —— P4 四个新玩法系统 ——
+## 砖墙：形状轮廓表与「砖数恒为 TEMPLATE_TOTAL」这条不变量的验算口径
+var _wall_script: GDScript = null
+var _shape_profiles: Dictionary = {}
+var _shape_none := 0
+var _shape_count := 0
+var _shape_from_level := 0
+var _template_total := 0
+var _wall_columns := 0
+## 热度：档位倍率表（断言「倍率必须是整数」）与逐秒回落速度
+var _heat_script: GDScript = null
+var _heat_tier_mult: Array = []
+var _heat_tier_step := 0.0
+var _heat_decay := 0.0
+var _heat_penalty_step := 0.0
+var _heat_penalty_max := 0.0
+## 接球：凝滞的时间倍率与时长（断言还原的是「按下那一刻的全局倍率」而非写死 1.0）
+var _ability_script: GDScript = null
+var _bullet_time_scale := 0.0
+var _bullet_time_seconds := 0.0
+var _flow_script: GDScript = null
 var _main_script: GDScript = null
 var _sfx_script: GDScript = null
 var _ball_script: GDScript = null
@@ -156,6 +181,39 @@ func _bind_constants() -> void:
 		_kind_names = bconsts.get("KIND_NAMES", [])
 	if _ball_manager_script() != null:
 		_max_balls = int(_ball_manager_script().get_script_constant_map().get("MAX_BALLS", 0))
+
+	# —— P4：四个新系统的常量同样从各自的属主脚本反查 ——
+	# 不从 main.god 取：main.gd 里那些是转发别名（const X := WallShapeProvider.X），
+	# 读别名等于让测试验证「别名指向了别名的值」，绕一圈却没验到真正的定义。
+	_bind_p4_constants()
+
+
+## P4 常量绑定。单独一个函数是因为它们来自四个不同脚本，
+## 塞进 _bind_constants 里会让人得往回翻才知道「这段在读谁的常量」。
+func _bind_p4_constants() -> void:
+	_wall_script = load(WALL_SCRIPT) as GDScript
+	if _wall_script != null:
+		var wc: Dictionary = _wall_script.get_script_constant_map()
+		_shape_profiles = wc.get("SHAPE_PROFILES", {})
+		_shape_none = int(wc.get("SHAPE_NONE", 0))
+		_shape_count = int(wc.get("SHAPE_COUNT", 0))
+		_shape_from_level = int(wc.get("SHAPE_FROM_LEVEL", 0))
+		_wall_columns = int(wc.get("COLUMNS", 0))
+		_template_total = int(wc.get("TEMPLATE_TOTAL", 0))
+	_heat_script = load(HEAT_SCRIPT) as GDScript
+	if _heat_script != null:
+		var hc: Dictionary = _heat_script.get_script_constant_map()
+		_heat_tier_mult = hc.get("HEAT_TIER_MULT", [])
+		_heat_tier_step = float(hc.get("HEAT_TIER_STEP", 0.0))
+		_heat_decay = float(hc.get("HEAT_DECAY_PER_SECOND", 0.0))
+		_heat_penalty_step = float(hc.get("HEAT_PENALTY_STEP_PX", 0.0))
+		_heat_penalty_max = float(hc.get("HEAT_PENALTY_MAX_PX", 0.0))
+	_flow_script = load(FLOW_SCRIPT) as GDScript
+	_ability_script = load(ABILITY_SCRIPT) as GDScript
+	if _ability_script != null:
+		var ac: Dictionary = _ability_script.get_script_constant_map()
+		_bullet_time_scale = float(ac.get("BULLET_TIME_SCALE", 1.0))
+		_bullet_time_seconds = float(ac.get("BULLET_TIME_SECONDS", 0.0))
 
 
 ## ball_manager.gd 的脚本对象。第 22 节要读 MAX_BALLS，
@@ -1349,6 +1407,19 @@ func _freeze_ball_physics(balls: BallManager) -> void:
 		b.set_physics_process(false)
 
 
+## 让 ball 按当前 flipped 算一次挡板反弹，返回归一化方向（纯计算，不移动球）。
+##
+## 直接调私有方法而不是模拟一次真实碰撞：反弹只取决于球相对挡板的横向偏移，
+## 模拟碰撞要多等若干帧并依赖球恰好没被别的东西拦住，
+## 那时测的是「这一帧球在哪」而不是「镜像算得对不对」。
+## 速度分量里还叠了挡板横向速度（真实擦球），所以比的是**符号与相对关系**，
+## 而非逐位相等。
+func _deflection_of(ball: Ball, flipped: bool) -> Vector2:
+	ball.set("flipped", flipped)
+	ball.call("_deflect_from_paddle")
+	return (ball.velocity as Vector2).normalized()
+
+
 ## 按「kind + 坐标」清单摆一组砖，返回同顺序的砖数组，并把清除计数归零。
 ## 用显式坐标而不是网格：爆破半径的断言需要「刚好在半径内」与「刚好在半径外」
 ## 两个邻居，网格间距给不出这种精度，只能靠猜——那样这条用例就变成在测自己的猜测。
@@ -1898,6 +1969,30 @@ func _open_run(scene: Node, mode: int, run_seed: int = -1) -> void:
 	await _wait(2)
 
 
+## 把关卡推进到指定关（无尽 / 每日模式才需要，经典模式到顶会结算）。
+##
+## 逐关走真实结算路径而不是直接 set("_level", n)：_level 只是个序号，
+## 直接改它不会触发 _start_level()，于是不会建墙、不会换球速，
+## 而 P4 的形状用例要验的恰恰是「按关卡号换形状」这条逻辑——
+## 绕过 _start_level() 就等于把被测代码整段跳过了，断言会一直绿而功能是坏的。
+## 每一步都确认确实推进了，否则这里会变成一个死循环。
+func _advance_to_level(scene: Node, target_level: int) -> bool:
+	for guard in 64:
+		if _gi(scene, "_level") >= target_level:
+			return true
+		var state := _gi(scene, "_state")
+		if state == _state_game_over or state == _state_won:
+			return false
+		await _clear_current_level(scene, 1)
+		_send_action(&"restart")
+		await _wait(4)
+		# 抽卡界面要再按一次：无尽模式每过一关都抽
+		if _gi(scene, "_state") == _state_draft:
+			_send_action(&"restart")
+			await _wait(4)
+	return _gi(scene, "_level") >= target_level
+
+
 ## 让当前关立刻判定通关：把计数推到只剩最后一块，释放其余，再真实击破最后一块。
 ## 复用第 13 / 15 节的做法——直接调 _settle() 会跳过结算面板与图例，
 ## 而 P3 的抽卡入口正是挂在结算面板上的。
@@ -2012,7 +2107,496 @@ func _finish_p3_suite() -> void:
 	await _run_p3_daily()
 	await _run_p3_draft_panel_rebuild()
 	_run_p3_font_subset()
+	await _finish_p4_suite()
 	_finish()
+
+
+# —— 24. P4：接球 / 热度 / 凝滞 / 形状 ——
+
+
+## 四个新系统放在一批，但**用例顺序不能随意调**：
+## 凝滞用例动过 Engine.time_scale，它必须在最后跑并自行还原，
+## 否则一旦它失败，后面所有依赖物理帧推进的断言都会被时间尺度带偏，
+## 症状是「一批毫不相干的用例集体变慢」——那是最难回溯的一类失败。
+func _finish_p4_suite() -> void:
+	_run_p4_static_contracts()
+	await _run_p4_wall_shapes()
+	await _run_p4_catch_flow()
+	await _run_p4_heat()
+	await _run_p4_bullet_time()
+
+
+## ---------- 24a. 四个新系统的静态契约 ----------
+func _run_p4_static_contracts() -> void:
+	_check(_wall_script != null and _heat_script != null
+			and _flow_script != null and _ability_script != null,
+		"P4 四套脚本都能加载（wall_shape_provider / heat_system / caught_ball_flow / ability_system）")
+	if _wall_script == null or _heat_script == null:
+		return
+
+	_check(_shape_count > 1 and _shape_profiles.size() == _shape_count - 1,
+		"形状轮廓表覆盖除 SHAPE_NONE 外的每一种形状（%d 种，表里 %d 条）"
+		% [_shape_count, _shape_profiles.size()])
+
+	# 热度倍率必须是整数。这是「总分始终是每块砖分值的整数倍」这条不变量
+	# 在新系统上不被打破的唯一前提——倍率一旦出现 1.5 这类小数，
+	# 玩家拿到的分数就除不尽砖块单价，而这条不变量在 headless 里因为
+	# 热度恒为 0 照样通过，只有真实游玩才炸。所以在这里守住表的**取值域**。
+	var non_integer := 0
+	for value in _heat_tier_mult:
+		if typeof(value) != TYPE_INT:
+			non_integer += 1
+	_check(non_integer == 0 and not _heat_tier_mult.is_empty(),
+		"热度倍率全部是整数（%s）" % str(_heat_tier_mult))
+
+	# 每块砖分数与连击单位分必须相等，否则「连击奖励也是每块砖分值的整数倍」
+	# 这条推导在 HeatSystem 那边就断了。
+	_check(_points_per_brick > 0 and int(_heat_script.get_script_constant_map()
+			.get("COMBO_UNIT_POINTS", 0)) == _points_per_brick,
+		"连击单位分 == 每块砖基础分（连击奖励同样是整数倍）")
+
+	# 经典模式只有 3 关，形状从第 4 关起才生效：这条不成立的话
+	# 「经典模式的墙逐位等于 BRICK_LAYOUT」这条既有断言会被新系统直接推翻。
+	_check(_shape_from_level > _max_level,
+		"形状启用关卡（%d）晚于经典模式最后一关（%d）" % [_shape_from_level, _max_level])
+
+
+## ---------- 24b. 形状墙：砖数恒定 ----------
+##
+## 这一节验证的是新系统唯一会动到「通关判定」的那条性质。
+## Main 的通关判定读 wall.total，所以形状一旦改变总砖数，
+## 「已清除计数达标即通关」就会错判——而这条性质在真实游玩里极难察觉：
+## 多一块砖则永远差一下打不完，少一块则最后一击提前结算。
+func _run_p4_wall_shapes() -> void:
+	if _wall_script == null:
+		return
+
+	# 静态验算：每种轮廓逐行相加恒等于 TEMPLATE_TOTAL。
+	# 这是最快的守门方式——不建场就能抓住「往表里加一行却忘了改总数」。
+	var bad_profiles: Array = []
+	for shape_value in _shape_profiles:
+		if not bool(_wall_script.call("profile_sums_to_total", int(shape_value))):
+			bad_profiles.append(int(shape_value))
+	_check(bad_profiles.is_empty(),
+		"每种形状轮廓的砖数都等于 %d（不对的形状：%s）"
+		% [_template_total, str(bad_profiles)])
+
+	# 动态验算：真的建出来，数一数场上到底几块砖。
+	var scene: Node = await _spawn_scene()
+	await _open_run(scene, _mode("RUN"), 20261005)
+	var wall: Node2D = scene.get_node("WallShapeProvider") as Node2D
+	_check(wall != null, "Main.tscn 挂了 WallShapeProvider 节点")
+
+	# 第 1 关先原地验：形状必须还没生效。
+	var level := _gi(scene, "_level")
+	var bricks_l1: Node2D = scene.get_node("Bricks") as Node2D
+	_check(_gi(wall, "shape") == _shape_none
+			and bricks_l1.get_child_count() == _template_total,
+		"第 1 关仍是满墙 %d 块（形状从第 %d 关起才生效）"
+		% [_template_total, _shape_from_level])
+
+	# 然后一路推进，每过一关取一次快照。
+	# 用 seed 20261005 而不是写死某个种子：_shape_for() 同时掺入种子与关卡号，
+	# 一个种子未必能在前若干关里凑齐所有形状，而「表里有没有一条永远抽不到」
+	# 正是这类查表驱动的设计最容易留下的洞。
+	var seen: Dictionary = {}
+	var rows_seen: Dictionary = {}
+	var total_mismatch: Array = []
+	var last_level := _gi(scene, "_level")
+	for step in 28:
+		level = _gi(scene, "_level")
+		last_level = level
+		var shape_value := _gi(wall, "shape")
+		seen[shape_value] = true
+		rows_seen[_gi(wall, "rows")] = true
+		# 通关判定的阈值是 wall.total：它必须等于场上真实砖数，
+		# 否则差一块就永远打不完、差一块就提前结算。
+		var on_wall := (scene.get_node("Bricks") as Node2D).get_child_count()
+		if on_wall != _gi(wall, "total"):
+			total_mismatch.append(level)
+		# 墙的行数必须与轮廓表一致（形状表改了行数但 build() 没跟上时这里会炸）
+		if shape_value != _shape_none:
+			var profile: Array = _shape_profiles.get(shape_value, [])
+			if profile.size() != _gi(wall, "rows"):
+				total_mismatch.append(-level)
+		if not await _advance_to_level(scene, level + 1):
+			break
+
+	_check(last_level >= _shape_from_level + 1,
+		"推进到了形状生效之后（第 %d 关，形状从第 %d 关起生效）"
+		% [last_level, _shape_from_level])
+	_check(seen.size() >= 3,
+		"一路推进撞见至少 3 种形状（含 none，实际 %d 种）" % seen.size())
+	_check(rows_seen.size() >= 3,
+		"墙高至少出现 3 种（实际 %s 行）" % str(rows_seen.keys()))
+	_check(total_mismatch.is_empty(),
+		"每关 wall.total 与场上真实砖数一致，且行数与轮廓表相符（异常关卡 %s）"
+		% str(total_mismatch))
+	scene.queue_free()
+	await _wait(2)
+
+
+## ---------- 24c. 接球：蓄力与主动接住 ----------
+##
+## 这一节全部靠**驱动 CaughtBallFlow 的输入入口**而不是模拟真实碰撞。
+## 让球真的飞回挡板需要几百帧的物理推演，而接住这一帧具体落在哪一帧
+## 取决于球速与挡板位置——那样测的就不是「接住规则对不对」，
+## 而是「这一帧球恰好在哪」。
+func _run_p4_catch_flow() -> void:
+	var scene: Node = await _spawn_scene()
+	await _open_run(scene, _mode("RUN"), 424242)
+	var flow: Node = scene.get_node("CaughtBallFlow")
+	var balls := _balls(scene)
+
+	_check(not bool(flow.call("is_charging")), "开局未在蓄力态")
+
+	# 按下 launch：此刻球吸附在挡板上，应当立刻进入蓄力。
+	# 必须用 _hold_action 而不是 _send_action：后者是「按下 + 立刻松开」，
+	# 而「松开」正是发射——用它测蓄力会在同一个调用里把球打出去，
+	# 于是 is_charging() 读到 false，看起来像是「按下没生效」。
+	_hold_action(&"launch")
+	await _wait(2)
+	_check(bool(flow.call("is_charging")), "球吸附时按下 launch 进入蓄力态")
+	_check(_gf(scene, "_charge") >= 0.0 and _gf(scene, "_charge") <= 1.0,
+		"蓄力进度可经 Main 的转发属性读到且在 0~1 内（%.3f）" % _gf(scene, "_charge"))
+
+	# 蓄力条应当随帧推进（这一条挡住「tick 忘了接」这种静默失效）。
+	var before_charge := _gf(scene, "_charge")
+	await _wait(2)
+	_check(_gf(scene, "_charge") > before_charge,
+		"蓄力进度逐帧增长（%.3f -> %.3f）" % [before_charge, _gf(scene, "_charge")])
+
+	# 松开发射：球应当离手且脱离吸附态。
+	_release_action(&"launch")
+	await _wait(2)
+	_check(not bool(flow.call("is_charging")), "松开发射后回到未蓄力态")
+	_check(not bool(balls.primary().get("attached_to_paddle")), "松手后球已脱板飞出")
+
+	# —— 飞行中按下 launch：挂起接球意图，而不是把飞行中的球拉回来 ——
+	# 这一条是老 bug 的正面回归：`main.gd` 以前用 attached_to_paddle 当闸门，
+	# 球在飞行时按空格什么都不会发生，于是蓄力在一颗球的一生里只生效一次。
+	_hold_action(&"launch")
+	await _wait(2)
+	_check(bool(flow.call("is_catch_armed")),
+		"球在飞行时按下 launch 会挂起接球意图")
+	_check(not bool(flow.call("is_charging")),
+		"飞行中按下 launch 不会把在飞的球拉回蓄力态")
+
+	# 球碰上挡板时兑现接住意图。
+	var caught_ball: Ball = balls.primary()
+	(flow as Object).call("on_paddle_contact", caught_ball)
+	await _wait(2)
+	_check(bool(flow.call("is_charging")), "球碰上挡板时接球意图兑现，��入蓄力")
+	_check(not bool(caught_ball.get("attached_to_paddle")) == false,
+		"被接住的球回到吸附态（蓄力期间必须一动不动）")
+	_check(not bool(flow.call("is_catch_armed")),
+		"兑现后不再重复兑现（否则一颗球能被接住好几次）")
+
+	# —— 不按 = 经典自动反弹 ——
+	# 「不作为」必须是不作为而不是另一条分支：这条断了就是
+	# 「玩家想让它弹开，它非要把球粘住」。
+	flow.call("reset")
+	await _wait(2)
+	_send_action(&"launch")
+	await _wait(2)
+	var free_ball: Ball = balls.primary()
+	flow.call("on_paddle_contact", free_ball)
+	await _wait(2)
+	_check(not bool(flow.call("is_charging")),
+		"没挂接球意图时碰板只是普通反弹，不会把球粘住")
+
+	# —— 暂停必须中断蓄力 ——
+	# 否则恢复后玩家看到一条满蓄力条却按不动。
+	# 先把球收吸附态：上一段结束时球是弹飞出去的，而飞行中按下 launch
+	# 会挂起接球意图而不是蓄力——那正是 24c 要验的规则，这里不该反过来依赖它。
+	balls.stick_primary()
+	flow.call("on_ball_attached", balls.primary())
+	await _wait(2)
+	_hold_action(&"launch")
+	await _wait(2)
+	_check(bool(flow.call("is_charging")), "重新进入蓄力态")
+	_send_action(&"pause")
+	await _wait(2)
+	_check(_gi(scene, "_state") == _state_paused, "蓄力中可暂停")
+	_check(not bool(flow.call("is_charging")), "暂停立刻中断蓄力（不留满蓄力条）")
+	_release_action(&"launch")
+	_send_action(&"pause")
+	await _wait(3)
+	_check(_gi(scene, "_state") == _state_playing, "可恢复")
+
+	# —— 方向锁存：满蓄力时按住右，发射角应当偏离正上方 ——
+	flow.call("reset")
+	await _wait(2)
+	_hold_action(&"move_right")
+	_hold_action(&"launch")
+	await _wait(2)
+	var straight: Vector2 = flow.call("launch_direction", 0.0)
+	var tilted: Vector2 = flow.call("launch_direction", 1.0)
+	_release_action(&"launch")
+	_release_action(&"move_right")
+	_check(is_equal_approx(straight.x, 0.0) and tilted.x > straight.x,
+		"按住右时蓄力越满发射角越偏右（%.3f -> %.3f）" % [straight.x, tilted.x])
+	_check(tilted.y < 0.0, "发射方向恒指向斜上方（不会朝下打）")
+
+	scene.queue_free()
+	await _wait(2)
+
+
+## ---------- 24d. 热度：整数倍率与不变量 ----------
+##
+## 关键设计取舍在这里被验证：**热度只认「主动接住」，不认普通碰挡板。**
+## 所以这一节全部直接驱动 HeatSystem 的事件入口——
+## 真去模拟「玩家恰好在球碰到挡板的那一帧按下空格」既慢又不确定。
+## 直接驱动事件入口验的是规则本身（倍率整数、回落、代价、清零），
+## 而「接住」到「register_catch」这条连线由 24c 的接球用例覆盖。
+func _run_p4_heat() -> void:
+	var scene: Node = await _spawn_scene()
+	await _open_run(scene, _mode("RUN"), 987654)
+	var heat: Node = scene.get_node("HeatSystem")
+	var paddle: Paddle = scene.get_node("Paddle") as Paddle
+
+	_check(int(heat.call("score_mult")) == _heat_tier_mult[0],
+		"开局热度倍率为最低档 %d" % _heat_tier_mult[0])
+	_check(is_zero_approx(_gf(heat, "_heat")), "开局热度为 0")
+
+	# 普通碰挡板不涨热度。这条是刻意的：碰挡板是被动行为，
+	# 按它涨热度等于奖励玩家什么都不做。
+	heat.call("register_break")
+	_check(is_zero_approx(_gf(heat, "_heat")), "击碎砖块不涨热度（只有接球才涨）")
+
+	# 逐档接球，每档都验一次倍率与挡板代价。
+	var width_at_peace := paddle.paddle_width
+	var tier_ok := true
+	var penalty_ok := true
+	var int_ok := true
+	# 只走到第 size-1 档：倍率表有 N 项就意味着 N 个档位（0..N-1），
+	# 而档位索引是 clampi(heat / HEAT_TIER_STEP, 0, N-1)——
+	# 循环写成 range(N) 会去够一个取不到的档，于是「倍率等于表第 N 项」永远不成立，
+	# 症状看起来像「热度爬不上去」，实际是断言问了一个不存在的问题。
+	for i in range(_heat_tier_mult.size() - 1):
+		heat.call("reset_heat")
+		# 涨到第 i+1 档：register_catch 每次加 HEAT_PER_CATCH，
+		# 用它自己涨到刚好越过档线，避免测试里复算一遍加法（会跟着常量一起过期）。
+		for n in 400:
+			heat.call("register_catch")
+			if _gi(heat, "_last_tier") >= i + 1:
+				break
+		if int(heat.call("score_mult")) != int(_heat_tier_mult[i + 1]):
+			tier_ok = false
+		if _gi(heat, "_last_tier") != i + 1:
+			tier_ok = false
+		# 挡板代价 = 档位 × 每档步长，封顶在 HEAT_PENALTY_MAX_PX
+		var want_penalty := minf(float(i + 1) * _heat_penalty_step, _heat_penalty_max)
+		if not is_equal_approx(float(heat.call("paddle_penalty")), want_penalty):
+			penalty_ok = false
+		if typeof(heat.call("score_mult")) != TYPE_INT:
+			int_ok = false
+	_check(tier_ok, "热度逐档爬升时倍率跟着 HEAT_TIER_MULT 走")
+	_check(penalty_ok, "热度代价按档位 × 步长并封顶（上限 %.0f px）" % _heat_penalty_max)
+	_check(int_ok, "score_mult() 返回的是 int 而非 float")
+
+	# 热度满档时的挡板确实比平静时窄——这是玩家当场能感觉到的代价。
+	heat.call("reset_heat")
+	scene.call("_apply_paddle_width")
+	await _wait(1)
+	var width_calm := paddle.paddle_width
+	heat.call("reset_heat")
+	for n in 200:
+		heat.call("register_catch")
+	scene.call("_apply_paddle_width")
+	await _wait(1)
+	_check(paddle.paddle_width < width_calm,
+		"满热度时挡板比平静时窄（%.1f -> %.1f）" % [width_calm, paddle.paddle_width])
+	_check(is_equal_approx(width_calm, width_at_peace) or width_calm <= width_at_peace,
+		"清零热度后挡板宽度回到基准")
+
+	# —— 核心不变量：分数倍率是整数，「总分是每块砖分值的整数倍」不被打破 ——
+	# 这条必须在满倍率下验。倍率 1 时任何乘数都成立，验了等于没验。
+	var score_mult := int(heat.call("score_mult"))
+	_check(score_mult > 1, "现在处于非最低档（×%d），下面的整数性断言才有意义" % score_mult)
+	var brick_points := _points_per_brick * int(_kind_mult[_kind("NORMAL")]) \
+		* int(scene.call("_card_score_mult"))
+	var gained := brick_points * score_mult
+	_check(gained % brick_points == 0 and gained / brick_points == score_mult,
+		"砖块分 × 热度倍率仍是砖块分值的整数倍（%d × %d = %d）"
+		% [brick_points, score_mult, gained])
+
+	# 真打一块砖验一遍：分数走 _brick_score，必须真的乘上倍率。
+	heat.call("reset_heat")
+	await _wait(1)
+	var bricks: Node2D = scene.get_node("Bricks")
+	var normal := _find_kind(bricks, _kind("NORMAL"))
+	_check(normal != null, "墙上有一块普通砖可用于打倍率")
+	if normal != null:
+		for n in 200:
+			heat.call("register_catch")
+		var mult := int(heat.call("score_mult"))
+		# 先把砖的分值取好：击碎的那一帧砖就 queue_free 了，
+		# 断言里再读 normal.points 拿到的是「previously freed」，
+		# 而症状是一行 Invalid access 打断整个函数——后面所有断言都不再执行，
+		# 看起来像「测试没跑」，实际是被一行过期的引用腰斩了。
+		var brick_points_hit := normal.points
+		normal.hits_left = 1
+		normal.max_hits = 1
+		var score_before := _gi(scene, "_score")
+		(_balls(scene).primary().brick_hit as Signal).emit(normal)
+		await _wait(3)
+		var delta := _gi(scene, "_score") - score_before
+		_check(delta == brick_points_hit * mult,
+			"实际击碎砖块时分数乘上了热度倍率（期望 %d × %d = %d，实得 %d）"
+			% [brick_points_hit, mult, brick_points_hit * mult, delta])
+
+	# —— 回落 —— 热度是计时器，不回落就只涨不跌，退化成纯增益。
+	var before_decay := _gf(heat, "_heat")
+	for n in 400:
+		heat.call("tick", 1.0 / 60.0)
+	_check(_gf(heat, "_heat") < before_decay,
+		"热度随时间回落（%.2f -> %.2f）" % [before_decay, _gf(heat, "_heat")])
+	for n in 2000:
+		heat.call("tick", 1.0 / 60.0)
+	_check(is_zero_approx(_gf(heat, "_heat")), "热度不会跌成负数")
+	_check(int(heat.call("score_mult")) == _heat_tier_mult[0], "回落后倍率回到最低档")
+
+	# —— 换关清热度但保留跨关统计 ——
+	heat.call("register_break")
+	heat.call("register_break")
+	var best_before := int(heat.call("best_combo"))
+	heat.call("reset_level")
+	_check(is_zero_approx(_gf(heat, "_heat")), "换关清热度")
+	_check(int(heat.call("best_combo")) == best_before,
+		"换关保留最好连击（整局口径，不该按关重算）")
+
+	# —— 开新一局全清 ——
+	heat.call("register_catch")
+	heat.call("register_break")
+	heat.call("reset_run")
+	_check(is_zero_approx(_gf(heat, "_heat")) and int(heat.call("best_combo")) == 0
+			and int(heat.call("combo_total")) == 0,
+		"开新一局把热度与连击统计全部归零")
+
+	scene.queue_free()
+	await _wait(2)
+
+
+## ---------- 24e. 凝滞：Engine.time_scale 的所有权 ----------
+##
+## 这一节最后跑，因为它动的是全局时间倍率。
+## 最要紧的一条断言是**还原**：整套测试自己就靠 Engine.time_scale = 4.0
+## 加速（见 _initialize），而 reset() 与 _exit_tree 都会被无条件调用。
+## 若 AbilitySystem 在「没持有过倍率」时也去写 Engine.time_scale，
+## 就会把 4.0 抹成 1.0——后果是整个测试从那一刻起慢四倍并开始大面积超时，
+## 而错误信息指向的却是某个毫不相干的用例。
+## 所以守卫不是「还原成 1.0」，而是一道持有标记。
+func _run_p4_bullet_time() -> void:
+	var scene: Node = await _spawn_scene()
+	await _open_run(scene, _mode("RUN"), 555111)
+	var abilities: Node = scene.get_node("AbilitySystem")
+	var balls := _balls(scene)
+
+	var global_scale := Engine.time_scale
+	_check(global_scale > 0.0, "凝滞用例开始前记录全局倍率（%.2f）" % global_scale)
+
+	# —— 没持有时不许碰全局量 ——
+	abilities.call("reset")
+	await _wait(2)
+	_check(is_equal_approx(Engine.time_scale, global_scale),
+		"没开过凝滞时 reset() 不动 Engine.time_scale（仍为 %.2f）" % global_scale)
+
+	# —— 开凝滞：应当是「当前全局倍率 × BULLET_TIME_SCALE」，不是写死成某个值 ——
+	var charges_before := int(abilities.call("charges"))
+	_check(charges_before > 0, "开局至少有一次凝滞（%d 次）" % charges_before)
+	abilities.call("on_bullet_time_input", true)
+	await _wait(1)
+	_check(bool(abilities.call("is_bullet_time_active")), "按下 bullet_time 进入凝滞")
+	_check(is_equal_approx(Engine.time_scale, global_scale * _bullet_time_scale),
+		"凝滞把时间倍率压到全局值的 %.0f%%（%.3f）"
+		% [_bullet_time_scale * 100.0, Engine.time_scale])
+	_check(int(abilities.call("charges")) == charges_before - 1,
+		"用掉一次凝滞次数（%d -> %d）" % [charges_before, int(abilities.call("charges"))])
+
+	# —— 次数耗尽后不再生效 ——
+	abilities.call("on_bullet_time_input", false)
+	await _wait(1)
+	var left := 0.0
+	while bool(abilities.call("is_bullet_time_active")) and left < 600:
+		await _wait(1)
+		left += 1
+	_check(not bool(abilities.call("is_bullet_time_active")), "凝滞按时长自动结束")
+	_check(is_equal_approx(Engine.time_scale, global_scale),
+		"凝滞结束后 Engine.time_scale 还原为 %.2f" % global_scale)
+
+	while int(abilities.call("charges")) > 0:
+		abilities.call("on_bullet_time_input", false)
+		await _wait(1)
+		abilities.call("on_bullet_time_input", true)
+		await _wait(2)
+		abilities.call("on_bullet_time_input", false)
+		await _wait(2)
+		await _wait(60)
+	_check(int(abilities.call("charges")) == 0, "凝滞次数可以被耗尽")
+	abilities.call("on_bullet_time_input", true)
+	await _wait(1)
+	_check(not bool(abilities.call("is_bullet_time_active")), "次数耗尽后凝滞不再生效")
+	_check(is_equal_approx(Engine.time_scale, global_scale),
+		"没生效的凝滞不该动过 Engine.time_scale")
+
+	# —— reset() 必须在持有期间还原 ——
+	abilities.call("grant_charges", 1)
+	await _wait(1)
+	abilities.call("on_bullet_time_input", true)
+	await _wait(1)
+	_check(bool(abilities.call("is_bullet_time_active")), "补给后能再次凝滞")
+	_check(is_equal_approx(Engine.time_scale, global_scale * _bullet_time_scale),
+		"补给后时间倍率再次被压低")
+	abilities.call("reset")
+	await _wait(2)
+	_check(not bool(abilities.call("is_bullet_time_active")), "reset() 结束凝滞")
+	_check(is_equal_approx(Engine.time_scale, global_scale),
+		"reset() 把 Engine.time_scale 还原为 %.2f（不是写死 1.0）" % global_scale)
+
+	# —— 扳挡 ——
+	var paddle: Paddle = scene.get_node("Paddle") as Paddle
+	_check(not bool(abilities.call("is_flipped")), "开局未扳挡")
+	abilities.call("on_flip_pressed")
+	await _wait(2)
+	_check(bool(abilities.call("is_flipped")), "按下 flip 进入扳挡态")
+	_check(bool(paddle.get("flipped")), "扳挡状态同步到挡板（视觉可读）")
+	var flipped_ball: Ball = balls.primary()
+	_check(bool(flipped_ball.get("flipped")), "扳挡状态同步到场上每颗球")
+	# 连按锁：按住不放不该把挡板来回翻
+	abilities.call("on_flip_pressed")
+	await _wait(2)
+	_check(bool(abilities.call("is_flipped")), "扳挡有连按锁，按第二下不会立刻翻回去")
+
+	# 镜像正确性：同样偏移的球，扳挡后横向分量取反、纵向不变。
+	# 校验纵向量是为了挡住「整个速度向量取负」那种改法——
+	# 它会让球朝下飞，而「速度朝下」这件事在断言里看不出来。
+	var probe: Ball = balls.primary()
+	probe.global_position = paddle.global_position + Vector2(40.0, -10.0)
+	var normal_dir := _deflection_of(probe, false)
+	var flipped_dir := _deflection_of(probe, true)
+	# 两个数都按「正常 → 扳挡」的顺序打印：反过来的话「纵向不变」这条
+	# 会打印成 (0.738 vs -0.738)，读起来像自相矛盾，而它其实只是在说相等。
+	_check(is_equal_approx(flipped_dir.y, normal_dir.y),
+		"扳挡只镜像横向分量，纵向不变（正常 %.3f → 扳挡 %.3f）"
+		% [normal_dir.y, flipped_dir.y])
+	_check(not is_equal_approx(flipped_dir.x, normal_dir.x),
+		"扳挡确实把横向分量取了反（正常 %.3f → 扳挡 %.3f）"
+		% [normal_dir.x, flipped_dir.x])
+	_check(flipped_dir.y < 0.0 and flipped_dir.x < 0.0,
+		"偏右的球在扳挡后往左上方飞（%.3f, %.3f）" % [flipped_dir.x, flipped_dir.y])
+
+	# reset() 复位扳挡，且不碰时间倍率（此刻没持有）
+	abilities.call("reset")
+	await _wait(2)
+	_check(not bool(abilities.call("is_flipped")), "reset() 复位扳挡")
+	_check(not bool(paddle.get("flipped")), "挡板视觉同步复位")
+	_check(is_equal_approx(Engine.time_scale, global_scale), "复位扳挡不动时间倍率")
+
+	scene.queue_free()
+	await _wait(2)
+	_check(is_equal_approx(Engine.time_scale, global_scale),
+		"场景释放后 Engine.time_scale 仍为 %.2f（_exit_tree 兜底）" % global_scale)
 
 
 ## ---------- 23a. GameMode 的静态契约 ----------
